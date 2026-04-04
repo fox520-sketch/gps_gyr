@@ -97,6 +97,7 @@
       <span><i class="dot gps"></i> GPS 軌跡</span>
       <span><i class="dot imu"></i> 陀螺儀軌跡</span>
     </div>
+    <div class="mini" style="margin:-4px 0 12px 0;">地圖上長按約 0.6 秒可新增標記；短按不會直接新增。</div>
 
     <div class="group"><div class="row"><div><label style="margin:0">顯示 GPS 軌跡</label><div class="mini">藍色線可獨立開關</div></div><input id="showGpsLine" class="switch" type="checkbox" checked></div></div>
     <div class="group"><div class="row"><div><label style="margin:0">顯示陀螺儀軌跡</label><div class="mini">紫色虛線可獨立開關</div></div><input id="showImuLine" class="switch" type="checkbox" checked></div></div>
@@ -221,6 +222,9 @@
     userMarkers: [],
     markerRefs: [],
     markerLayer: null,
+    mapPressTimer: null,
+    mapPressStart: null,
+    suppressNextMapClick: false,
     showGpsLine: true,
     showImuLine: true,
     lastGpsFix: null,
@@ -918,7 +922,7 @@
   }
 
   function addUserMarker(lat, lng){
-    const name = prompt("輸入標記名稱：","");
+    const name = prompt("輸入標記名稱（長按新增）：","");
     if(!name) return;
     state.userMarkers.push({lat: lat, lng: lng, name: name});
     renderUserMarkers();
@@ -1130,9 +1134,55 @@
   loadState();
   initMap();
   renderUserMarkers();
-  state.map.on("click", function(e){
-    addUserMarker(e.latlng.lat, e.latlng.lng);
+
+  function clearMapPressTimer(){
+    if(state.mapPressTimer){
+      clearTimeout(state.mapPressTimer);
+      state.mapPressTimer = null;
+    }
+  }
+
+  function beginLongPress(latlng){
+    clearMapPressTimer();
+    state.mapPressStart = Date.now();
+    state.mapPressTimer = setTimeout(function(){
+      state.suppressNextMapClick = true;
+      addUserMarker(latlng.lat, latlng.lng);
+      clearMapPressTimer();
+    }, 600);
+  }
+
+  state.map.on("mousedown", function(e){
+    beginLongPress(e.latlng);
   });
+
+  state.map.on("touchstart", function(e){
+    if(e.latlng) beginLongPress(e.latlng);
+  });
+
+  state.map.on("mouseup", function(){
+    clearMapPressTimer();
+  });
+
+  state.map.on("touchend", function(){
+    clearMapPressTimer();
+  });
+
+  state.map.on("mouseout", function(){
+    clearMapPressTimer();
+  });
+
+  state.map.on("movestart", function(){
+    clearMapPressTimer();
+  });
+
+  state.map.on("click", function(){
+    if(state.suppressNextMapClick){
+      state.suppressNextMapClick = false;
+      return;
+    }
+  });
+
   renderHistory();
   updateUI();
 })();
