@@ -1,0 +1,7 @@
+Deploy target:
+- GitHub Pages supported
+- PWA install supported
+- Includes .nojekyll, GitHub Actions workflow, manifest, service worker, icons
+
+Note:
+- For custom domain, rename CNAME.example to CNAME and replace with your domain.
