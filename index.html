@@ -218,6 +218,8 @@
     gpsPointLayer: null,
     imuPointLayer: null,
     placeLabelMarker: null,
+    userMarkers: [],
+    markerLayer: null,
     showGpsLine: true,
     showImuLine: true,
     lastGpsFix: null,
@@ -294,7 +296,8 @@
       imuFilterAlpha: state.imuFilterAlpha,
       exportFormat: state.exportFormat,
       imuStillCounter: state.imuStillCounter,
-      imuLastAcceptedAt: state.imuLastAcceptedAt
+      imuLastAcceptedAt: state.imuLastAcceptedAt,
+      userMarkers: state.userMarkers
     }));
   }
 
@@ -304,6 +307,12 @@
       if(!raw) return;
       const saved = JSON.parse(raw);
       Object.assign(state, saved);
+      if(state.userMarkers && state.markerLayer){
+        state.userMarkers.forEach(function(m){
+          const mk = L.marker([m.lat, m.lng]).addTo(state.markerLayer);
+          mk.bindPopup('<b>' + m.name + '</b><br>' + m.lat.toFixed(6) + ',' + m.lng.toFixed(6));
+        });
+      }
     }catch(e){}
   }
 
@@ -405,6 +414,7 @@
     state.gpsPointLayer = L.layerGroup().addTo(state.map);
     state.imuPointLayer = L.layerGroup().addTo(state.map);
     state.marker = L.marker([25.033, 121.5654]).addTo(state.map);
+    state.markerLayer = L.layerGroup().addTo(state.map);
     state.placeLabelMarker = L.marker([25.033, 121.5654], {
       interactive: true,
       icon: L.divIcon({
@@ -882,6 +892,18 @@
     updateUI(false);
   }
 
+  
+  function addUserMarker(lat, lng){
+    const name = prompt("輸入標記名稱：","");
+    if(!name) return;
+
+    const marker = L.marker([lat, lng]).addTo(state.markerLayer);
+    marker.bindPopup('<b>' + escapeHtml(name) + '</b><br>' + lat.toFixed(6) + ',' + lng.toFixed(6));
+
+    state.userMarkers.push({lat, lng, name});
+    saveState();
+  }
+
   function updateImuDebug(){
     const parts = [];
     const permissionText = state.imuPermissionHint === "granted"
@@ -1065,6 +1087,9 @@
 
   loadState();
   initMap();
+  state.map.on("click", function(e){
+    addUserMarker(e.latlng.lat, e.latlng.lng);
+  });
   renderHistory();
   updateUI();
 })();
