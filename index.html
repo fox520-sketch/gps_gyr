@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#2563eb">
-  <title>GPS / 陀螺儀 軌跡紀錄器 BG+ 穩定版</title>
+  <title>GPS / 陀螺儀 軌跡紀錄器 BG+ 顯示修正版</title>
   <link rel="manifest" href="./manifest.json">
   <link rel="apple-touch-icon" href="./icons/icon-192.png">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -55,8 +55,8 @@
   <div class="card"><div class="panel">
     <div class="top">
       <div>
-        <h1>GPS / 陀螺儀 軌跡紀錄器 BG+ 穩定版</h1>
-        <div class="sub">這版先以穩定為主，修正地圖顯示，並加強 IMU 防抖與靜止抑制。</div>
+        <h1>GPS / 陀螺儀 軌跡紀錄器 BG+ 顯示修正版</h1>
+        <div class="sub">這版先以穩定為主，修正地圖顯示，保留 GPS / IMU 基本功能、兩條線開關、5 個設定、回到目前位置、位置名稱。</div>
       </div>
       <div id="recordBadge" class="badge">Idle</div>
     </div>
@@ -128,7 +128,7 @@
       <div class="group"><div class="row"><div><label style="margin:0">背景前強制保存</label></div><input id="aggressiveSave" class="switch" type="checkbox" checked></div></div>
       <div class="group"><label for="minDistance">GPS 最小記錄距離（公尺）</label><input id="minDistance" class="input" type="number" min="0" step="1" value="5"></div>
       <div class="group"><label for="imuScale">陀螺儀推估倍率</label><input id="imuScale" class="input" type="number" min="0.1" step="0.1" value="1.0"></div>
-      <div class="group"><label for="imuFilterAlpha">陀螺儀濾波係數</label><input id="imuFilterAlpha" class="input" type="number" min="0" max="0.99" step="0.01" value="0.93"></div>
+      <div class="group"><label for="imuFilterAlpha">陀螺儀濾波係數</label><input id="imuFilterAlpha" class="input" type="number" min="0" max="0.99" step="0.01" value="0.85"></div>
     </div>
 
     <div class="tab-panel" id="tab-export">
@@ -163,7 +163,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 (function(){
-  const STORAGE_KEY = "gps_imu_track_recorder_stable_core_v2";
+  const STORAGE_KEY = "gps_imu_track_recorder_stable_core_v1";
   const HISTORY_KEY = "gps_imu_track_recorder_stable_history_v1";
   const EARTH = 6371000;
 
@@ -186,7 +186,7 @@
     aggressiveSave: true,
     minDistance: 5,
     imuScale: 1,
-    imuFilterAlpha: 0.93,
+    imuFilterAlpha: 0.85,
     exportFormat: "gpx",
     startedAt: null,
     elapsedMs: 0,
@@ -198,6 +198,8 @@
     marker: null,
     gpsLine: null,
     imuLine: null,
+    gpsPointLayer: null,
+    imuPointLayer: null,
     showGpsLine: true,
     showImuLine: true,
     lastGpsFix: null,
@@ -210,8 +212,6 @@
     imuLastMoveAt: null,
     imuLastAccel: null,
     imuPermissionHint: "unknown",
-    imuStillCounter: 0,
-    imuLastAcceptedAt: null,
     error: ""
   };
 
@@ -271,9 +271,7 @@
       minDistance: state.minDistance,
       imuScale: state.imuScale,
       imuFilterAlpha: state.imuFilterAlpha,
-      exportFormat: state.exportFormat,
-      imuStillCounter: state.imuStillCounter,
-      imuLastAcceptedAt: state.imuLastAcceptedAt
+      exportFormat: state.exportFormat
     }));
   }
 
@@ -379,27 +377,54 @@
       maxZoom: 19
     }).addTo(state.map);
     state.map.setView([25.033, 121.5654], 16);
-    state.gpsLine = L.polyline([], { color: "#2563eb", weight: 4, opacity: 0.95 }).addTo(state.map);
-    state.imuLine = L.polyline([], { color: "#7c3aed", weight: 8, opacity: 1, dashArray: "12 8" }).addTo(state.map);
+    state.gpsLine = L.polyline([], { color: "#2563eb", weight: 5, opacity: 1 }).addTo(state.map);
+    state.imuLine = L.polyline([], { color: "#7c3aed", weight: 9, opacity: 1, dashArray: "12 8" }).addTo(state.map);
+    state.gpsPointLayer = L.layerGroup().addTo(state.map);
+    state.imuPointLayer = L.layerGroup().addTo(state.map);
     state.marker = L.marker([25.033, 121.5654]).addTo(state.map);
     setTimeout(function(){ state.map.invalidateSize(); }, 200);
   }
 
   function renderMap(){
     if(!state.map) return;
-    const gpsLatLngs = state.showGpsLine ? state.gpsPoints.map(p => [p.lat, p.lng]) : [];
-    const imuLatLngs = state.showImuLine ? state.imuPoints.map(p => [p.lat, p.lng]) : [];
-    state.gpsLine.setLatLngs(gpsLatLngs);
-    state.imuLine.setLatLngs(imuLatLngs);
+    const gpsLatLngs = state.gpsPoints.map(p => [p.lat, p.lng]);
+    const imuLatLngs = state.imuPoints.map(p => [p.lat, p.lng]);
+
+    state.gpsLine.setLatLngs(state.showGpsLine ? gpsLatLngs : []);
+    state.imuLine.setLatLngs(state.showImuLine ? imuLatLngs : []);
+
+    if(state.gpsPointLayer) state.gpsPointLayer.clearLayers();
+    if(state.imuPointLayer) state.imuPointLayer.clearLayers();
+
+    if(state.showGpsLine){
+      gpsLatLngs.forEach(function(ll, idx){
+        if(idx === gpsLatLngs.length - 1 || gpsLatLngs.length <= 2){
+          L.circleMarker(ll, { radius: 5, color: "#2563eb", weight: 2, fillColor: "#2563eb", fillOpacity: 0.9 }).addTo(state.gpsPointLayer);
+        }
+      });
+    }
+    if(state.showImuLine){
+      imuLatLngs.forEach(function(ll, idx){
+        if(idx === imuLatLngs.length - 1 || imuLatLngs.length <= 3){
+          L.circleMarker(ll, { radius: 4, color: "#7c3aed", weight: 2, fillColor: "#7c3aed", fillOpacity: 0.85 }).addTo(state.imuPointLayer);
+        }
+      });
+    }
+
     const latest = latestPoint();
     if(latest){
       state.marker.setLatLng([latest.lat, latest.lng]);
-      const all = gpsLatLngs.concat(imuLatLngs);
-      if(state.followMap){
-        if(all.length === 1) state.map.setView(all[0], 18);
-        if(all.length >= 2) state.map.fitBounds(all, { padding:[24,24] });
-      }
     }
+
+    const visibleAll = []
+      .concat(state.showGpsLine ? gpsLatLngs : [])
+      .concat(state.showImuLine ? imuLatLngs : []);
+
+    if(state.followMap){
+      if(visibleAll.length === 1) state.map.setView(visibleAll[0], 18);
+      if(visibleAll.length >= 2) state.map.fitBounds(visibleAll, { padding:[24,24] });
+    }
+
     setTimeout(function(){ if(state.map) state.map.invalidateSize(); }, 50);
   }
 
@@ -566,8 +591,6 @@
     state.imuLastEventAt = null;
     state.imuLastMoveAt = null;
     state.imuLastAccel = null;
-    state.imuStillCounter = 0;
-    state.imuLastAcceptedAt = null;
 
     const anchor = state.lastGpsFix || { lat: state.map.getCenter().lat, lng: state.map.getCenter().lng };
     state.imuSession = {
@@ -603,55 +626,23 @@
 
       state.imuLastAccel = { x:Number(a.x||0), y:Number(a.y||0), z:Number(a.z||0) };
 
-      const alpha = Math.max(0, Math.min(0.99, Number(state.imuFilterAlpha)||0.93));
+      const alpha = Math.max(0, Math.min(0.99, Number(state.imuFilterAlpha)||0.85));
       s.fx = alpha * s.fx + (1-alpha) * Number(a.x||0);
       s.fy = alpha * s.fy + (1-alpha) * Number(a.y||0);
-
-      const mag = Math.hypot(s.fx, s.fy);
-
-      if(mag < 0.03){
-        state.imuStillCounter += 1;
-      }else{
-        state.imuStillCounter = 0;
-      }
-
-      if(state.imuStillCounter >= 3){
-        s.velocityNorth *= 0.35;
-        s.velocityEast *= 0.35;
-      }
-
-      if(state.imuStillCounter >= 8){
-        s.velocityNorth = 0;
-        s.velocityEast = 0;
-        return;
-      }
 
       const heading = (state.orientationHeading || 0) * Math.PI / 180;
       const northAcc = (s.fy * Math.cos(heading) - s.fx * Math.sin(heading)) * state.imuScale;
       const eastAcc = (s.fy * Math.sin(heading) + s.fx * Math.cos(heading)) * state.imuScale;
 
-      s.velocityNorth = (s.velocityNorth + northAcc * dt) * 0.72;
-      s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.72;
-
-      const speed = Math.hypot(s.velocityNorth, s.velocityEast);
-
-      if(speed < 0.015 && mag < 0.05){
-        s.velocityNorth = 0;
-        s.velocityEast = 0;
-        return;
-      }
-
+      s.velocityNorth = (s.velocityNorth + northAcc * dt) * 0.88;
+      s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.88;
       s.posNorth += s.velocityNorth * dt;
       s.posEast += s.velocityEast * dt;
 
-      if(speed >= 0.02 || mag >= 0.05){
+      const speed = Math.hypot(s.velocityNorth, s.velocityEast);
+      if(speed >= 0.01 || Math.abs(s.fx) >= 0.01 || Math.abs(s.fy) >= 0.01){
         state.imuLastMoveAt = Date.now();
       }
-
-      if(state.imuLastAcceptedAt && Date.now() - state.imuLastAcceptedAt < 350){
-        return;
-      }
-      state.imuLastAcceptedAt = Date.now();
 
       const ll = offsetLatLng(s.anchor, s.posNorth, s.posEast);
       addPoint({
@@ -767,7 +758,6 @@
     parts.push("權限：" + permissionText);
     parts.push("IMU 點位：" + state.imuPoints.length);
     parts.push("感測事件數：" + state.imuEventCount);
-    parts.push("穩定計數：" + state.imuStillCounter);
     parts.push("最後事件：" + (state.imuLastEventAt ? new Date(state.imuLastEventAt).toLocaleTimeString() : "--"));
     parts.push("最後移動：" + (state.imuLastMoveAt ? new Date(state.imuLastMoveAt).toLocaleTimeString() : "--"));
 
@@ -820,8 +810,8 @@
     const hiddenInfo = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
     const title = state.error || (state.isRecording ? "正在記錄" : "尚未開始");
     const text = latest
-      ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo
-      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo;
+      ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo
+      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo;
     el.statusBox.innerHTML = "<strong>" + escapeHtml(title) + "</strong><span>" + escapeHtml(text) + "</span>";
 
     renderPoints();
