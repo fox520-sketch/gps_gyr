@@ -398,7 +398,7 @@
     state.imuPointLayer = L.layerGroup().addTo(state.map);
     state.marker = L.marker([25.033, 121.5654]).addTo(state.map);
     state.placeLabelMarker = L.marker([25.033, 121.5654], {
-      interactive: false,
+      interactive: true,
       icon: L.divIcon({
         className: "place-label-wrapper",
         html: "",
@@ -447,6 +447,17 @@
           iconSize: [220, 32],
           iconAnchor: [10, 34]
         }));
+        const popupHtml =
+          '<div style="min-width:180px;line-height:1.6;">' +
+          '<div style="font-weight:700;font-size:14px;margin-bottom:4px;">' + escapeHtml(labelText) + '</div>' +
+          '<div>緯度：' + latest.lat.toFixed(6) + '</div>' +
+          '<div>經度：' + latest.lng.toFixed(6) + '</div>' +
+          '<div>來源：' + escapeHtml((latest.sourceMode || "gps").toUpperCase()) + '</div>' +
+          '<div>時間：' + new Date(latest.timestamp).toLocaleString() + '</div>' +
+          (Number.isFinite(latest.speed) ? '<div>速度：' + formatSpeed(latest.speed) + '</div>' : '') +
+          (Number.isFinite(latest.altitude) ? '<div>海拔：' + formatAlt(latest.altitude) + '</div>' : '') +
+          '</div>';
+        state.placeLabelMarker.bindPopup(popupHtml);
         if(!state.map.hasLayer(state.placeLabelMarker)) state.placeLabelMarker.addTo(state.map);
       }else{
         if(state.map.hasLayer(state.placeLabelMarker)) state.map.removeLayer(state.placeLabelMarker);
