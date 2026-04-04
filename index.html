@@ -223,7 +223,7 @@
     markerRefs: [],
     markerLayer: null,
     mapPressTimer: null,
-    mapPressStart: null,
+    mapPressLatLng: null,
     suppressNextMapClick: false,
     showGpsLine: true,
     showImuLine: true,
@@ -1142,35 +1142,47 @@
     }
   }
 
-  function beginLongPress(latlng){
+  function beginLongPressFromDomEvent(ev){
     clearMapPressTimer();
-    state.mapPressStart = Date.now();
+    var latlng = state.map.mouseEventToLatLng(ev);
+    state.mapPressLatLng = latlng;
     state.mapPressTimer = setTimeout(function(){
       state.suppressNextMapClick = true;
-      addUserMarker(latlng.lat, latlng.lng);
+      if(navigator.vibrate) { try { navigator.vibrate(30); } catch(e) {} }
+      if(state.mapPressLatLng){
+        addUserMarker(state.mapPressLatLng.lat, state.mapPressLatLng.lng);
+      }
       clearMapPressTimer();
     }, 600);
   }
 
-  state.map.on("mousedown", function(e){
-    beginLongPress(e.latlng);
+  const mapContainer = state.map.getContainer();
+
+  mapContainer.addEventListener("mousedown", function(ev){
+    beginLongPressFromDomEvent(ev);
   });
 
-  state.map.on("touchstart", function(e){
-    if(e.latlng) beginLongPress(e.latlng);
-  });
-
-  state.map.on("mouseup", function(){
+  mapContainer.addEventListener("mouseup", function(){
     clearMapPressTimer();
   });
 
-  state.map.on("touchend", function(){
+  mapContainer.addEventListener("mouseleave", function(){
     clearMapPressTimer();
   });
 
-  state.map.on("mouseout", function(){
+  mapContainer.addEventListener("touchstart", function(ev){
+    if(ev.touches && ev.touches.length){
+      beginLongPressFromDomEvent(ev.touches[0]);
+    }
+  }, { passive: true });
+
+  mapContainer.addEventListener("touchend", function(){
     clearMapPressTimer();
-  });
+  }, { passive: true });
+
+  mapContainer.addEventListener("touchcancel", function(){
+    clearMapPressTimer();
+  }, { passive: true });
 
   state.map.on("movestart", function(){
     clearMapPressTimer();
