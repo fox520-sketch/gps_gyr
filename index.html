@@ -219,6 +219,7 @@
     imuPointLayer: null,
     placeLabelMarker: null,
     userMarkers: [],
+    markerRefs: [],
     markerLayer: null,
     showGpsLine: true,
     showImuLine: true,
@@ -307,12 +308,6 @@
       if(!raw) return;
       const saved = JSON.parse(raw);
       Object.assign(state, saved);
-      if(state.userMarkers && state.markerLayer){
-        state.userMarkers.forEach(function(m){
-          const mk = L.marker([m.lat, m.lng]).addTo(state.markerLayer);
-          mk.bindPopup('<b>' + m.name + '</b><br>' + m.lat.toFixed(6) + ',' + m.lng.toFixed(6));
-        });
-      }
     }catch(e){}
   }
 
@@ -893,16 +888,63 @@
   }
 
   
+  function escapeAttr(s){
+    return String(s).replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+  }
+
+  function saveMarkerState(){
+    saveState();
+  }
+
+  function renderUserMarkers(){
+    if(!state.markerLayer) return;
+    state.markerLayer.clearLayers();
+    state.markerRefs = [];
+    state.userMarkers.forEach(function(m, idx){
+      const mk = L.marker([m.lat, m.lng]).addTo(state.markerLayer);
+      const popupHtml =
+        '<div style="min-width:190px;line-height:1.6;">' +
+        '<div style="font-weight:700;font-size:14px;margin-bottom:4px;">' + escapeHtml(m.name) + '</div>' +
+        '<div>緯度：' + m.lat.toFixed(6) + '</div>' +
+        '<div>經度：' + m.lng.toFixed(6) + '</div>' +
+        '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">' +
+        '<button class="btn secondary" style="padding:6px 10px;border-radius:10px;" onclick="editUserMarker(' + idx + ')">編輯</button>' +
+        '<button class="btn danger" style="padding:6px 10px;border-radius:10px;" onclick="deleteUserMarker(' + idx + ')">刪除</button>' +
+        '</div>' +
+        '</div>';
+      mk.bindPopup(popupHtml);
+      state.markerRefs.push(mk);
+    });
+  }
+
   function addUserMarker(lat, lng){
     const name = prompt("輸入標記名稱：","");
     if(!name) return;
-
-    const marker = L.marker([lat, lng]).addTo(state.markerLayer);
-    marker.bindPopup('<b>' + escapeHtml(name) + '</b><br>' + lat.toFixed(6) + ',' + lng.toFixed(6));
-
-    state.userMarkers.push({lat, lng, name});
-    saveState();
+    state.userMarkers.push({lat: lat, lng: lng, name: name});
+    renderUserMarkers();
+    saveMarkerState();
   }
+
+  window.editUserMarker = function(idx){
+    const item = state.userMarkers[idx];
+    if(!item) return;
+    const name = prompt("修改標記名稱：", item.name || "");
+    if(name === null) return;
+    item.name = name.trim() || item.name;
+    renderUserMarkers();
+    saveMarkerState();
+    if(state.markerRefs[idx]) state.markerRefs[idx].openPopup();
+  };
+
+  window.deleteUserMarker = function(idx){
+    const item = state.userMarkers[idx];
+    if(!item) return;
+    const ok = confirm("刪除標記「" + item.name + "」？");
+    if(!ok) return;
+    state.userMarkers.splice(idx, 1);
+    renderUserMarkers();
+    saveMarkerState();
+  };
 
   function updateImuDebug(){
     const parts = [];
@@ -1087,6 +1129,7 @@
 
   loadState();
   initMap();
+  renderUserMarkers();
   state.map.on("click", function(e){
     addUserMarker(e.latlng.lat, e.latlng.lng);
   });
