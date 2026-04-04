@@ -1,6 +1,6 @@
 {
-  "name": "GPS / 陀螺儀 軌跡紀錄器 BG+",
-  "short_name": "GPS IMU BG+",
+  "name": "GPS / 陀螺儀 軌跡紀錄器 BG+ 穩定版",
+  "short_name": "GPS IMU Stable",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
