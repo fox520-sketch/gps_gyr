@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#2563eb">
-  <title>GPS / 陀螺儀 軌跡紀錄器 BG+ IMU 超穩定版</title>
+  <title>GPS / 陀螺儀 軌跡紀錄器 BG+ 顯示修正版</title>
   <link rel="manifest" href="./manifest.json">
   <link rel="apple-touch-icon" href="./icons/icon-192.png">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -47,20 +47,6 @@
     #map{width:100%;min-height:76vh;height:100%}
     .legend .dot{width:12px;height:12px;border-radius:999px;display:inline-block}.dot.gps{background:#2563eb}.dot.imu{background:#7c3aed}
     .ok{color:#166534;font-weight:700}.bad{color:#b91c1c;font-weight:700}
-    
-    .place-label{
-      display:inline-block;
-      background:rgba(255,255,255,0.96);
-      border:1px solid var(--border);
-      border-radius:10px;
-      padding:6px 10px;
-      font-size:12px;
-      font-weight:700;
-      color:var(--text);
-      box-shadow:0 4px 12px rgba(15,23,42,.12);
-      white-space:nowrap;
-    }
-
     @media (max-width:1024px){.wrap{grid-template-columns:1fr}#map{min-height:52vh}}
   </style>
 </head>
@@ -69,7 +55,7 @@
   <div class="card"><div class="panel">
     <div class="top">
       <div>
-        <h1>GPS / 陀螺儀 軌跡紀錄器 BG+ IMU 超穩定版</h1>
+        <h1>GPS / 陀螺儀 軌跡紀錄器 BG+ 顯示修正版</h1>
         <div class="sub">這版先以穩定為主，修正地圖顯示，保留 GPS / IMU 基本功能、兩條線開關、5 個設定、回到目前位置、位置名稱。</div>
       </div>
       <div id="recordBadge" class="badge">Idle</div>
@@ -214,9 +200,6 @@
     imuLine: null,
     gpsPointLayer: null,
     imuPointLayer: null,
-    placeLabelMarker: null,
-    imuStillCounter: 0,
-    imuLastAcceptedAt: null,
     showGpsLine: true,
     showImuLine: true,
     lastGpsFix: null,
@@ -229,6 +212,8 @@
     imuLastMoveAt: null,
     imuLastAccel: null,
     imuPermissionHint: "unknown",
+    imuStillCounter: 0,
+    imuLastAcceptedAt: null,
     error: ""
   };
 
@@ -401,15 +386,6 @@
     state.gpsPointLayer = L.layerGroup().addTo(state.map);
     state.imuPointLayer = L.layerGroup().addTo(state.map);
     state.marker = L.marker([25.033, 121.5654]).addTo(state.map);
-    state.placeLabelMarker = L.marker([25.033, 121.5654], {
-      interactive: true,
-      icon: L.divIcon({
-        className: "place-label-wrapper",
-        html: "",
-        iconSize: [220, 32],
-        iconAnchor: [10, 34]
-      })
-    }).addTo(state.map);
     setTimeout(function(){ state.map.invalidateSize(); }, 200);
   }
 
@@ -442,32 +418,6 @@
     const latest = latestPoint();
     if(latest){
       state.marker.setLatLng([latest.lat, latest.lng]);
-      const labelText = (latest.placeName || state.placeName || "").trim();
-      if(labelText){
-        state.placeLabelMarker.setLatLng([latest.lat, latest.lng]);
-        state.placeLabelMarker.setIcon(L.divIcon({
-          className: "place-label-wrapper",
-          html: '<div class="place-label">' + escapeHtml(labelText) + '</div>',
-          iconSize: [220, 32],
-          iconAnchor: [10, 34]
-        }));
-        const popupHtml =
-          '<div style="min-width:180px;line-height:1.6;">' +
-          '<div style="font-weight:700;font-size:14px;margin-bottom:4px;">' + escapeHtml(labelText) + '</div>' +
-          '<div>緯度：' + latest.lat.toFixed(6) + '</div>' +
-          '<div>經度：' + latest.lng.toFixed(6) + '</div>' +
-          '<div>來源：' + escapeHtml((latest.sourceMode || "gps").toUpperCase()) + '</div>' +
-          '<div>時間：' + new Date(latest.timestamp).toLocaleString() + '</div>' +
-          (Number.isFinite(latest.speed) ? '<div>速度：' + formatSpeed(latest.speed) + '</div>' : '') +
-          (Number.isFinite(latest.altitude) ? '<div>海拔：' + formatAlt(latest.altitude) + '</div>' : '') +
-          '</div>';
-        state.placeLabelMarker.bindPopup(popupHtml);
-        if(!state.map.hasLayer(state.placeLabelMarker)) state.placeLabelMarker.addTo(state.map);
-      }else{
-        if(state.map.hasLayer(state.placeLabelMarker)) state.map.removeLayer(state.placeLabelMarker);
-      }
-    }else{
-      if(state.map.hasLayer(state.placeLabelMarker)) state.map.removeLayer(state.placeLabelMarker);
     }
 
     const visibleAll = []
@@ -688,32 +638,36 @@
       s.fy = alpha * s.fy + (1 - alpha) * Number(a.y || 0);
 
       const mag = Math.hypot(s.fx, s.fy);
-      const heading = (state.orientationHeading || 0) * Math.PI / 180;
 
-      // 靜止判斷：很小的加速度連續出現時，快速把速度壓到 0，避免漂移
+      // 靜止判斷：小幅雜訊不累積位移
       if(mag < 0.025){
         state.imuStillCounter += 1;
       }else{
         state.imuStillCounter = 0;
       }
 
+      // 連續接近靜止時，快速衰減速度
       if(state.imuStillCounter >= 3){
         s.velocityNorth *= 0.18;
         s.velocityEast *= 0.18;
       }
+
+      // 長一點時間靜止就直接鎖住，避免原地漂移
       if(state.imuStillCounter >= 6){
         s.velocityNorth = 0;
         s.velocityEast = 0;
       }
+
       if(state.imuStillCounter >= 10){
         return;
       }
 
-      // 只有在明顯移動時才累積位移
+      // 不到明顯移動門檻就不畫點
       if(mag < 0.04){
         return;
       }
 
+      const heading = (state.orientationHeading || 0) * Math.PI / 180;
       const northAcc = (s.fy * Math.cos(heading) - s.fx * Math.sin(heading)) * state.imuScale;
       const eastAcc = (s.fy * Math.sin(heading) + s.fx * Math.cos(heading)) * state.imuScale;
 
@@ -722,7 +676,6 @@
 
       const speed = Math.hypot(s.velocityNorth, s.velocityEast);
 
-      // 很小的速度直接歸零
       if(speed < 0.03){
         s.velocityNorth = 0;
         s.velocityEast = 0;
@@ -733,7 +686,7 @@
       s.posEast += s.velocityEast * dt;
       state.imuLastMoveAt = Date.now();
 
-      // 限制寫入頻率，避免點數狂增
+      // 限制寫點頻率，避免點數暴增
       if(state.imuLastAcceptedAt && Date.now() - state.imuLastAcceptedAt < 500){
         return;
       }
@@ -903,11 +856,11 @@
     else { el.recordBadge.textContent = "Idle"; el.recordBadge.className = "badge"; }
 
     const latest = latestPoint();
-    const hiddenInfo + imuTune = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
+    const imuTune = state.imuEnabled ? "；IMU防漂移已啟用" : ""; const hiddenInfo = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
     const title = state.error || (state.isRecording ? "正在記錄" : "尚未開始");
     const text = latest
       ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune
-      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo;
+      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune;
     el.statusBox.innerHTML = "<strong>" + escapeHtml(title) + "</strong><span>" + escapeHtml(text) + "</span>";
 
     renderPoints();
