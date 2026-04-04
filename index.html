@@ -56,7 +56,7 @@
     <div class="top">
       <div>
         <h1>GPS / 陀螺儀 軌跡紀錄器 BG+ 穩定版</h1>
-        <div class="sub">這版先以穩定為主，修正地圖顯示，保留 GPS / IMU 基本功能、兩條線開關、5 個設定、回到目前位置、位置名稱。</div>
+        <div class="sub">這版先以穩定為主，修正地圖顯示，並加強 IMU 防抖與靜止抑制。</div>
       </div>
       <div id="recordBadge" class="badge">Idle</div>
     </div>
@@ -128,7 +128,7 @@
       <div class="group"><div class="row"><div><label style="margin:0">背景前強制保存</label></div><input id="aggressiveSave" class="switch" type="checkbox" checked></div></div>
       <div class="group"><label for="minDistance">GPS 最小記錄距離（公尺）</label><input id="minDistance" class="input" type="number" min="0" step="1" value="5"></div>
       <div class="group"><label for="imuScale">陀螺儀推估倍率</label><input id="imuScale" class="input" type="number" min="0.1" step="0.1" value="1.0"></div>
-      <div class="group"><label for="imuFilterAlpha">陀螺儀濾波係數</label><input id="imuFilterAlpha" class="input" type="number" min="0" max="0.99" step="0.01" value="0.85"></div>
+      <div class="group"><label for="imuFilterAlpha">陀螺儀濾波係數</label><input id="imuFilterAlpha" class="input" type="number" min="0" max="0.99" step="0.01" value="0.93"></div>
     </div>
 
     <div class="tab-panel" id="tab-export">
@@ -163,7 +163,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 (function(){
-  const STORAGE_KEY = "gps_imu_track_recorder_stable_core_v1";
+  const STORAGE_KEY = "gps_imu_track_recorder_stable_core_v2";
   const HISTORY_KEY = "gps_imu_track_recorder_stable_history_v1";
   const EARTH = 6371000;
 
@@ -186,7 +186,7 @@
     aggressiveSave: true,
     minDistance: 5,
     imuScale: 1,
-    imuFilterAlpha: 0.85,
+    imuFilterAlpha: 0.93,
     exportFormat: "gpx",
     startedAt: null,
     elapsedMs: 0,
@@ -210,6 +210,8 @@
     imuLastMoveAt: null,
     imuLastAccel: null,
     imuPermissionHint: "unknown",
+    imuStillCounter: 0,
+    imuLastAcceptedAt: null,
     error: ""
   };
 
@@ -269,7 +271,9 @@
       minDistance: state.minDistance,
       imuScale: state.imuScale,
       imuFilterAlpha: state.imuFilterAlpha,
-      exportFormat: state.exportFormat
+      exportFormat: state.exportFormat,
+      imuStillCounter: state.imuStillCounter,
+      imuLastAcceptedAt: state.imuLastAcceptedAt
     }));
   }
 
@@ -562,6 +566,8 @@
     state.imuLastEventAt = null;
     state.imuLastMoveAt = null;
     state.imuLastAccel = null;
+    state.imuStillCounter = 0;
+    state.imuLastAcceptedAt = null;
 
     const anchor = state.lastGpsFix || { lat: state.map.getCenter().lat, lng: state.map.getCenter().lng };
     state.imuSession = {
@@ -597,23 +603,55 @@
 
       state.imuLastAccel = { x:Number(a.x||0), y:Number(a.y||0), z:Number(a.z||0) };
 
-      const alpha = Math.max(0, Math.min(0.99, Number(state.imuFilterAlpha)||0.85));
+      const alpha = Math.max(0, Math.min(0.99, Number(state.imuFilterAlpha)||0.93));
       s.fx = alpha * s.fx + (1-alpha) * Number(a.x||0);
       s.fy = alpha * s.fy + (1-alpha) * Number(a.y||0);
+
+      const mag = Math.hypot(s.fx, s.fy);
+
+      if(mag < 0.03){
+        state.imuStillCounter += 1;
+      }else{
+        state.imuStillCounter = 0;
+      }
+
+      if(state.imuStillCounter >= 3){
+        s.velocityNorth *= 0.35;
+        s.velocityEast *= 0.35;
+      }
+
+      if(state.imuStillCounter >= 8){
+        s.velocityNorth = 0;
+        s.velocityEast = 0;
+        return;
+      }
 
       const heading = (state.orientationHeading || 0) * Math.PI / 180;
       const northAcc = (s.fy * Math.cos(heading) - s.fx * Math.sin(heading)) * state.imuScale;
       const eastAcc = (s.fy * Math.sin(heading) + s.fx * Math.cos(heading)) * state.imuScale;
 
-      s.velocityNorth = (s.velocityNorth + northAcc * dt) * 0.88;
-      s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.88;
+      s.velocityNorth = (s.velocityNorth + northAcc * dt) * 0.72;
+      s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.72;
+
+      const speed = Math.hypot(s.velocityNorth, s.velocityEast);
+
+      if(speed < 0.015 && mag < 0.05){
+        s.velocityNorth = 0;
+        s.velocityEast = 0;
+        return;
+      }
+
       s.posNorth += s.velocityNorth * dt;
       s.posEast += s.velocityEast * dt;
 
-      const speed = Math.hypot(s.velocityNorth, s.velocityEast);
-      if(speed >= 0.01 || Math.abs(s.fx) >= 0.01 || Math.abs(s.fy) >= 0.01){
+      if(speed >= 0.02 || mag >= 0.05){
         state.imuLastMoveAt = Date.now();
       }
+
+      if(state.imuLastAcceptedAt && Date.now() - state.imuLastAcceptedAt < 350){
+        return;
+      }
+      state.imuLastAcceptedAt = Date.now();
 
       const ll = offsetLatLng(s.anchor, s.posNorth, s.posEast);
       addPoint({
@@ -729,6 +767,7 @@
     parts.push("權限：" + permissionText);
     parts.push("IMU 點位：" + state.imuPoints.length);
     parts.push("感測事件數：" + state.imuEventCount);
+    parts.push("穩定計數：" + state.imuStillCounter);
     parts.push("最後事件：" + (state.imuLastEventAt ? new Date(state.imuLastEventAt).toLocaleTimeString() : "--"));
     parts.push("最後移動：" + (state.imuLastMoveAt ? new Date(state.imuLastMoveAt).toLocaleTimeString() : "--"));
 
