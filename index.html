@@ -264,7 +264,7 @@ document.addEventListener("DOMContentLoaded", () => {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{attribution:"&copy; OpenStreetMap contributors"}).addTo(state.map);
     state.map.setView([25.033,121.5654],16);
     state.gpsLine=L.polyline([],{weight:4,color:"#2563eb",opacity:.95}).addTo(state.map);
-    state.imuLine=L.polyline([],{weight:7,color:"#7c3aed",opacity:1,dashArray:"12 8",lineCap:"round"}).addTo(state.map);
+    state.imuLine=L.polyline([],{weight:9,color:"#7c3aed",opacity:1,dashArray:"14 8",lineCap:"round"}).addTo(state.map);
     state.marker=L.marker([25.033,121.5654]).addTo(state.map);
   }
   function renderMap(){
@@ -301,7 +301,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const last=bucket[bucket.length-1]||null;
     if(last){
       const gap=haversineMeters(last,next);
-      if(gap<Math.max(0,Number(state.minDistance)||0))return;
+      const limit = next.sourceMode==="imu" ? 0 : Math.max(0,Number(state.minDistance)||0);
+      if(gap<limit)return;
       if(next.timestamp===last.timestamp)return;
     }
     bucket.push(next);
@@ -370,8 +371,7 @@ document.addEventListener("DOMContentLoaded", () => {
       session.position.north+=session.velocity.north*dt;
       session.position.east+=session.velocity.east*dt;
       const speed=Math.hypot(session.velocity.north,session.velocity.east);
-      if(speed>=0.08||Math.abs(forward)>=0.08||Math.abs(sideways)>=0.08)state.imuLastMoveAt=Date.now();
-      if(speed<0.08&&Math.abs(forward)<0.08&&Math.abs(sideways)<0.08)return;
+      if(speed>=0.01||Math.abs(forward)>=0.01||Math.abs(sideways)>=0.01)state.imuLastMoveAt=Date.now();
       const nextLL=offsetLatLng(session.anchor,session.position.north,session.position.east);
       addPointFromCoords({lat:nextLL.lat,lng:nextLL.lng,accuracy:null,altitude:null,speed,heading:state.orientationHeading,timestamp:Date.now(),sourceMode:"imu"});
     };
@@ -425,7 +425,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if(state.imuLastAccel){parts.push(`加速度：x ${state.imuLastAccel.x.toFixed(2)}, y ${state.imuLastAccel.y.toFixed(2)}, z ${state.imuLastAccel.z.toFixed(2)}`);}
     if(state.imuEnabled&&state.imuEventCount===0)parts.push('<span class="bad">已啟動 IMU，但還沒收到感測事件</span>');
     else if(state.imuEnabled&&state.imuPoints.length===0&&state.imuEventCount>0)parts.push('<span class="bad">有收到 IMU 事件，但尚未形成可繪製軌跡，請拿著手機實際移動幾步</span>');
-    else if(state.imuPoints.length>0)parts.push('<span class="ok">IMU 軌跡已生成，地圖上應顯示紫色線</span>');
+    else if(state.imuPoints.length>0)parts.push('<span class="ok">IMU 軌跡已生成，地圖上應顯示明顯的紫色虛線</span>');
     else parts.push('尚未啟動陀螺儀。');
     el.imuDebugText.innerHTML=parts.join('<br>');
   }
@@ -466,7 +466,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const latest=latestPoint();
     const hiddenInfo=`${state.showGpsLine?"":"；GPS 線已隱藏"}${state.showImuLine?"":"；IMU 線已隱藏"}`;
     const title = state.error || (state.isRecording ? "正在記錄" : "尚未開始");
-    const text = latest ? `最新點：${latest.lat.toFixed(6)}, ${latest.lng.toFixed(6)}${hiddenInfo}` : `按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。${hiddenInfo}`;
+    const text = latest ? `最新點：${latest.lat.toFixed(6)}, ${latest.lng.toFixed(6)}；GPS點 ${state.gpsPoints.length}；IMU點 ${state.imuPoints.length}${hiddenInfo}` : `按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 ${state.gpsPoints.length}；IMU點 ${state.imuPoints.length}${hiddenInfo}`;
     el.statusBox.innerHTML="<strong>"+esc(title)+"</strong><span>"+esc(text)+"</span>";
 
     renderPoints(); renderHistory(); renderMap(); updateCharts(); updateImuDebug();
