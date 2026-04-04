@@ -47,6 +47,20 @@
     #map{width:100%;min-height:76vh;height:100%}
     .legend .dot{width:12px;height:12px;border-radius:999px;display:inline-block}.dot.gps{background:#2563eb}.dot.imu{background:#7c3aed}
     .ok{color:#166534;font-weight:700}.bad{color:#b91c1c;font-weight:700}
+    
+    .place-label{
+      display:inline-block;
+      background:rgba(255,255,255,0.96);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:6px 10px;
+      font-size:12px;
+      font-weight:700;
+      color:var(--text);
+      box-shadow:0 4px 12px rgba(15,23,42,.12);
+      white-space:nowrap;
+    }
+
     @media (max-width:1024px){.wrap{grid-template-columns:1fr}#map{min-height:52vh}}
   </style>
 </head>
@@ -200,6 +214,7 @@
     imuLine: null,
     gpsPointLayer: null,
     imuPointLayer: null,
+    placeLabelMarker: null,
     showGpsLine: true,
     showImuLine: true,
     lastGpsFix: null,
@@ -382,6 +397,15 @@
     state.gpsPointLayer = L.layerGroup().addTo(state.map);
     state.imuPointLayer = L.layerGroup().addTo(state.map);
     state.marker = L.marker([25.033, 121.5654]).addTo(state.map);
+    state.placeLabelMarker = L.marker([25.033, 121.5654], {
+      interactive: false,
+      icon: L.divIcon({
+        className: "place-label-wrapper",
+        html: "",
+        iconSize: [220, 32],
+        iconAnchor: [10, 34]
+      })
+    }).addTo(state.map);
     setTimeout(function(){ state.map.invalidateSize(); }, 200);
   }
 
@@ -414,6 +438,21 @@
     const latest = latestPoint();
     if(latest){
       state.marker.setLatLng([latest.lat, latest.lng]);
+      const labelText = (latest.placeName || state.placeName || "").trim();
+      if(labelText){
+        state.placeLabelMarker.setLatLng([latest.lat, latest.lng]);
+        state.placeLabelMarker.setIcon(L.divIcon({
+          className: "place-label-wrapper",
+          html: '<div class="place-label">' + escapeHtml(labelText) + '</div>',
+          iconSize: [220, 32],
+          iconAnchor: [10, 34]
+        }));
+        if(!state.map.hasLayer(state.placeLabelMarker)) state.placeLabelMarker.addTo(state.map);
+      }else{
+        if(state.map.hasLayer(state.placeLabelMarker)) state.map.removeLayer(state.placeLabelMarker);
+      }
+    }else{
+      if(state.map.hasLayer(state.placeLabelMarker)) state.map.removeLayer(state.placeLabelMarker);
     }
 
     const visibleAll = []
