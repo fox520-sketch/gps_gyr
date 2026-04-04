@@ -765,14 +765,15 @@
   }
 
   function calibrateImu(){
-    if(!state.imuPoints.length || !state.lastGpsFix){
+    const gpsRef = state.lastGpsFix || (state.gpsPoints.length ? state.gpsPoints[state.gpsPoints.length - 1] : null);
+    if(!state.imuPoints.length || !gpsRef){
       state.error = "需要先有 IMU 軌跡與 GPS 定位點才能校準。";
       updateUI();
       return;
     }
     const lastImu = state.imuPoints[state.imuPoints.length - 1];
-    const dLat = state.lastGpsFix.lat - lastImu.lat;
-    const dLng = state.lastGpsFix.lng - lastImu.lng;
+    const dLat = gpsRef.lat - lastImu.lat;
+    const dLng = gpsRef.lng - lastImu.lng;
     state.imuPoints = state.imuPoints.map(function(p){
       return Object.assign({}, p, { lat: p.lat + dLat, lng: p.lng + dLng });
     });
@@ -782,7 +783,8 @@
         lng: state.imuSession.anchor.lng + dLng
       };
     }
-    state.points = state.gpsPoints.concat(state.imuPoints).sort((a,b)=>a.timestamp-b.timestamp);
+    state.points = state.gpsPoints.concat(state.imuPoints).sort(function(a,b){ return a.timestamp - b.timestamp; });
+    state.error = "";
     updateUI();
   }
 
@@ -809,12 +811,15 @@
       return;
     }
     latest.placeName = name;
-    if(latest.sourceMode === "gps" && state.gpsPoints.length){
-      state.gpsPoints[state.gpsPoints.length - 1].placeName = name;
-    }
-    if(latest.sourceMode === "imu" && state.imuPoints.length){
-      state.imuPoints[state.imuPoints.length - 1].placeName = name;
-    }
+
+    state.gpsPoints.forEach(function(p){
+      if(p.timestamp === latest.timestamp) p.placeName = name;
+    });
+    state.imuPoints.forEach(function(p){
+      if(p.timestamp === latest.timestamp) p.placeName = name;
+    });
+
+    state.points = state.gpsPoints.concat(state.imuPoints).sort(function(a,b){ return a.timestamp - b.timestamp; });
     state.error = "";
     saveState();
     updateUI(false);
@@ -867,7 +872,7 @@
 
     el.startBtn.disabled = state.gpsEnabled;
     el.startImuBtn.disabled = state.imuEnabled;
-    el.calibrateImuBtn.disabled = !state.imuPoints.length || !state.lastGpsFix;
+    el.calibrateImuBtn.disabled = !state.imuPoints.length;
     el.pauseBtn.disabled = !state.isRecording || state.isPaused;
     el.resumeBtn.disabled = !state.isRecording || !state.isPaused;
     el.stopBtn.disabled = !state.isRecording && !state.points.length;
