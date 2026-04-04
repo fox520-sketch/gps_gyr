@@ -73,7 +73,11 @@
 
     <div class="field">
       <label for="placeName">目前位置名稱</label>
-      <input id="placeName" class="input" type="text" placeholder="例如：公司、家裡、停車場入口">
+      <div class="inline">
+        <input id="placeName" class="input" type="text" placeholder="例如：公司、家裡、停車場入口">
+        <button id="applyPlaceNameBtn" class="btn secondary" type="button">套用位置名稱</button>
+      </div>
+      <div class="mini">輸入後按「套用位置名稱」，會更新到目前最新點位與地圖標籤。</div>
     </div>
 
     <div class="legend">
@@ -220,6 +224,7 @@
   const el = {
     trackName: $("trackName"),
     placeName: $("placeName"),
+    applyPlaceNameBtn: $("applyPlaceNameBtn"),
     renameBtn: $("renameBtn"),
     startBtn: $("startBtn"),
     startImuBtn: $("startImuBtn"),
@@ -795,6 +800,26 @@
     else if(state.lastGpsFix) state.map.setView([state.lastGpsFix.lat, state.lastGpsFix.lng], 18);
   }
 
+  function applyPlaceNameToCurrent(){
+    const name = (state.placeName || "").trim();
+    const latest = latestPoint();
+    if(!latest){
+      state.error = "目前還沒有位置點可套用名稱。";
+      updateUI();
+      return;
+    }
+    latest.placeName = name;
+    if(latest.sourceMode === "gps" && state.gpsPoints.length){
+      state.gpsPoints[state.gpsPoints.length - 1].placeName = name;
+    }
+    if(latest.sourceMode === "imu" && state.imuPoints.length){
+      state.imuPoints[state.imuPoints.length - 1].placeName = name;
+    }
+    state.error = "";
+    saveState();
+    updateUI(false);
+  }
+
   function updateImuDebug(){
     const parts = [];
     const permissionText = state.imuPermissionHint === "granted"
@@ -943,6 +968,7 @@
 
   el.trackName.addEventListener("input", function(){ state.trackName = this.value; saveState(); });
   el.placeName.addEventListener("input", function(){ state.placeName = this.value; saveState(); updateUI(false); });
+  el.applyPlaceNameBtn.addEventListener("click", function(){ applyPlaceNameToCurrent(); });
   el.renameBtn.addEventListener("click", function(){ state.trackName = "track-" + new Date().toISOString().slice(0,16).replace(/[:T]/g,"-"); updateUI(); });
   el.startBtn.addEventListener("click", startGps);
   el.startImuBtn.addEventListener("click", startImuFlow);
