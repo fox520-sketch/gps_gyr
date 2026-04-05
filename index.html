@@ -203,12 +203,12 @@
     <div class="tab-panel" id="tab-history"><div class="btns"><button id="refreshHistoryBtn" class="btn secondary" type="button">重新整理</button><button id="clearHistoryBtn" class="btn danger" type="button">清空歷史</button></div><div id="historyList" class="history"><div class="mini">目前沒有保存的歷史軌跡。</div></div></div>
     <div class="tab-panel" id="tab-charts">
       <div class="chart">
-        <label style="margin-bottom:8px">速度圖</label>
+        <label style="margin-bottom:8px">速度圖</label><div class="mini" style="margin-bottom:8px;">X 軸：時間（分:秒）｜Y 軸：速度（km/h）</div>
         <svg id="speedChart" viewBox="0 0 600 170" preserveAspectRatio="none"></svg>
       </div>
       <div style="height:10px"></div>
       <div class="chart">
-        <label style="margin-bottom:8px">海拔圖</label>
+        <label style="margin-bottom:8px">海拔圖</label><div class="mini" style="margin-bottom:8px;">X 軸：時間（分:秒）｜Y 軸：海拔（m）</div>
         <svg id="altChart" viewBox="0 0 600 170" preserveAspectRatio="none"></svg>
       </div>
     </div>
@@ -437,12 +437,19 @@
     `).join("");
   }
 
-  function drawLineChart(svgEl, values, lineColor, fillColor){
+  function formatAxisTime(ms){
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function drawLineChart(svgEl, values, timestamps, lineColor, fillColor, yUnit){
     if(!svgEl) return;
-    const width = 600, height = 170, pad = 16;
+    const width = 600, height = 170, padL = 42, padR = 14, padT = 12, padB = 26;
     svgEl.innerHTML = "";
 
-    if(!values.length){
+    if(!values.length || !timestamps.length){
       svgEl.innerHTML = '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#94a3b8" font-size="14">目前沒有資料</text>';
       return;
     }
@@ -453,24 +460,81 @@
       return;
     }
 
-    const min = Math.min.apply(null, finite);
-    const max = Math.max.apply(null, finite);
-    const span = (max - min) || 1;
+    const minV = Math.min.apply(null, finite);
+    const maxV = Math.max.apply(null, finite);
+    const spanV = (maxV - minV) || 1;
+
+    const minT = timestamps[0];
+    const maxT = timestamps[timestamps.length - 1];
+    const spanT = (maxT - minT) || 1;
+
+    function xFor(t){
+      return padL + ((width - padL - padR) * ((t - minT) / spanT));
+    }
+    function yFor(v){
+      const vv = Number.isFinite(v) ? v : minV;
+      return padT + ((height - padT - padB) * (1 - ((vv - minV) / spanV)));
+    }
+
+    const yTicks = 4;
+    let grid = '';
+    for(let i=0;i<=yTicks;i++){
+      const ratio = i / yTicks;
+      const y = padT + ((height - padT - padB) * ratio);
+      const value = maxV - (spanV * ratio);
+      grid += '<line x1="' + padL + '" y1="' + y + '" x2="' + (width-padR) + '" y2="' + y + '" stroke="#e2e8f0" stroke-width="1" />'
+           +  '<text x="' + (padL-6) + '" y="' + (y+4) + '" text-anchor="end" fill="#64748b" font-size="11">' + value.toFixed(1) + (i===0 ? ' ' + yUnit : '') + '</text>';
+    }
+
+    const xTicks = 4;
+    for(let i=0;i<=xTicks;i++){
+      const ratio = i / xTicks;
+      const t = minT + spanT * ratio;
+      const x = xFor(t);
+      grid += '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (height-padB) + '" stroke="#f1f5f9" stroke-width="1" />'
+           +  '<text x="' + x + '" y="' + (height-8) + '" text-anchor="middle" fill="#64748b" font-size="11">' + formatAxisTime(t - minT) + '</text>';
+    }
 
     const pts = values.map(function(v, i){
-      const x = pad + ((width - pad * 2) * (values.length === 1 ? 0 : i / (values.length - 1)));
-      const y = pad + ((height - pad * 2) * (1 - (((Number.isFinite(v) ? v : min) - min) / span)));
-      return [x, y];
+      return [xFor(timestamps[i]), yFor(v)];
     });
 
     const line = pts.map(function(p){ return p[0] + ',' + p[1]; }).join(' ');
-    const area = 'M ' + pts[0][0] + ' ' + (height - pad) + ' ' +
+    const area = 'M ' + pts[0][0] + ' ' + (height - padB) + ' ' +
       pts.map(function(p){ return 'L ' + p[0] + ' ' + p[1]; }).join(' ') +
-      ' L ' + pts[pts.length - 1][0] + ' ' + (height - pad) + ' Z';
+      ' L ' + pts[pts.length - 1][0] + ' ' + (height - padB) + ' Z';
+
+    const last = pts[pts.length - 1];
+    const lastValue = values[values.length - 1];
 
     svgEl.innerHTML =
+      grid +
+      '<line x1="' + padL + '" y1="' + (height-padB) + '" x2="' + (width-padR) + '" y2="' + (height-padB) + '" stroke="#94a3b8" stroke-width="1.2" />' +
+      '<line x1="' + padL + '" y1="' + padT + '" x2="' + padL + '" y2="' + (height-padB) + '" stroke="#94a3b8" stroke-width="1.2" />' +
       '<path d="' + area + '" fill="' + fillColor + '" />' +
-      '<polyline fill="none" stroke="' + lineColor + '" stroke-width="3" points="' + line + '" />';
+      '<polyline fill="none" stroke="' + lineColor + '" stroke-width="3" points="' + line + '" />' +
+      '<circle cx="' + last[0] + '" cy="' + last[1] + '" r="4" fill="' + lineColor + '" />' +
+      (Number.isFinite(lastValue) ? '<text x="' + Math.min(width-4, last[0] + 8) + '" y="' + Math.max(14, last[1] - 8) + '" fill="#334155" font-size="11">' + lastValue.toFixed(1) + ' ' + yUnit + '</text>' : '');
+  }
+
+  function updateCharts(){
+    const timestamps = state.points.map(function(p){ return Number(p.timestamp) || 0; });
+    drawLineChart(
+      el.speedChart,
+      state.points.map(function(p){ return Number.isFinite(p.speed) ? p.speed * 3.6 : NaN; }),
+      timestamps,
+      "#2563eb",
+      "rgba(37,99,235,.15)",
+      "km/h"
+    );
+    drawLineChart(
+      el.altChart,
+      state.points.map(function(p){ return Number(p.altitude); }),
+      timestamps,
+      "#16a34a",
+      "rgba(22,163,74,.15)",
+      "m"
+    );
   }
 
   function updateCharts(){
