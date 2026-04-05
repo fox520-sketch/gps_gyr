@@ -47,6 +47,22 @@
     #map{width:100%;min-height:76vh;height:100%}
     .legend .dot{width:12px;height:12px;border-radius:999px;display:inline-block}.dot.gps{background:#2563eb}.dot.imu{background:#7c3aed}
     .ok{color:#166534;font-weight:700}.bad{color:#b91c1c;font-weight:700}
+    .marker-pin{
+      width:16px;
+      height:16px;
+      border-radius:999px;
+      border:2px solid #fff;
+      box-shadow:0 2px 8px rgba(15,23,42,.25);
+    }
+    .marker-chip{
+      display:inline-block;
+      border-radius:999px;
+      padding:2px 8px;
+      font-size:11px;
+      font-weight:700;
+      margin-bottom:6px;
+      color:#fff;
+    }
     .place-label{
       display:inline-block;
       background:rgba(255,255,255,0.96);
@@ -91,6 +107,17 @@
         <button id="applyPlaceNameBtn" class="btn secondary" type="button">套用位置名稱</button>
       </div>
       <div class="mini">輸入後按「套用位置名稱」，會更新到目前最新點位與地圖標籤。</div>
+    </div>
+    <div class="field">
+      <label for="markerCategory">標記分類</label>
+      <select id="markerCategory" class="select">
+        <option value="default">一般</option>
+        <option value="home">家</option>
+        <option value="company">公司</option>
+        <option value="parking">停車</option>
+        <option value="warning">注意</option>
+      </select>
+      <div class="mini">長按新增標記時，會使用這個分類顏色。</div>
     </div>
 
     <div class="legend">
@@ -206,6 +233,7 @@
     imuScale: 1,
     imuFilterAlpha: 0.96,
     exportFormat: "gpx",
+    markerCategory: "default",
     startedAt: null,
     elapsedMs: 0,
     pausedAccumulatedMs: 0,
@@ -246,6 +274,7 @@
     trackName: $("trackName"),
     placeName: $("placeName"),
     applyPlaceNameBtn: $("applyPlaceNameBtn"),
+    markerCategory: $("markerCategory"),
     renameBtn: $("renameBtn"),
     startBtn: $("startBtn"),
     startImuBtn: $("startImuBtn"),
@@ -300,6 +329,7 @@
       imuScale: state.imuScale,
       imuFilterAlpha: state.imuFilterAlpha,
       exportFormat: state.exportFormat,
+      markerCategory: state.markerCategory,
       imuStillCounter: state.imuStillCounter,
       imuLastAcceptedAt: state.imuLastAcceptedAt,
       userMarkers: state.userMarkers
@@ -892,6 +922,28 @@
   }
 
   
+  function getCategoryMeta(category){
+    const map = {
+      "default": { label: "一般", color: "#2563eb" },
+      "home": { label: "家", color: "#16a34a" },
+      "company": { label: "公司", color: "#7c3aed" },
+      "parking": { label: "停車", color: "#f59e0b" },
+      "warning": { label: "注意", color: "#dc2626" }
+    };
+    return map[category] || map["default"];
+  }
+
+  function createUserMarkerIcon(category){
+    const meta = getCategoryMeta(category);
+    return L.divIcon({
+      className: "user-marker-wrapper",
+      html: '<div class="marker-pin" style="background:' + meta.color + ';"></div>',
+      iconSize: [16,16],
+      iconAnchor: [8,8],
+      popupAnchor: [0,-8]
+    });
+  }
+
   function escapeAttr(s){
     return String(s).replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;");
   }
@@ -905,9 +957,11 @@
     state.markerLayer.clearLayers();
     state.markerRefs = [];
     state.userMarkers.forEach(function(m, idx){
-      const mk = L.marker([m.lat, m.lng]).addTo(state.markerLayer);
+      const meta = getCategoryMeta(m.category || "default");
+      const mk = L.marker([m.lat, m.lng], { icon: createUserMarkerIcon(m.category || "default") }).addTo(state.markerLayer);
       const popupHtml =
         '<div style="min-width:190px;line-height:1.6;">' +
+        '<div class="marker-chip" style="background:' + meta.color + ';">' + escapeHtml(meta.label) + '</div>' +
         '<div style="font-weight:700;font-size:14px;margin-bottom:4px;">' + escapeHtml(m.name) + '</div>' +
         '<div>緯度：' + m.lat.toFixed(6) + '</div>' +
         '<div>經度：' + m.lng.toFixed(6) + '</div>' +
@@ -924,7 +978,12 @@
   function addUserMarker(lat, lng){
     const name = prompt("輸入標記名稱（長按新增）：","");
     if(!name) return;
-    state.userMarkers.push({lat: lat, lng: lng, name: name});
+    state.userMarkers.push({
+      lat: lat,
+      lng: lng,
+      name: name,
+      category: state.markerCategory || "default"
+    });
     renderUserMarkers();
     saveMarkerState();
   }
@@ -935,6 +994,11 @@
     const name = prompt("修改標記名稱：", item.name || "");
     if(name === null) return;
     item.name = name.trim() || item.name;
+    const category = prompt("修改分類（default/home/company/parking/warning）：", item.category || "default");
+    if(category !== null){
+      const allowed = ["default","home","company","parking","warning"];
+      item.category = allowed.includes(category.trim()) ? category.trim() : (item.category || "default");
+    }
     renderUserMarkers();
     saveMarkerState();
     if(state.markerRefs[idx]) state.markerRefs[idx].openPopup();
@@ -981,6 +1045,7 @@
     if(save === undefined) save = true;
     el.trackName.value = state.trackName;
     el.placeName.value = state.placeName;
+    if(el.markerCategory) el.markerCategory.value = state.markerCategory || "default";
     el.highAccuracy.checked = state.highAccuracy;
     el.followMap.checked = state.followMap;
     el.wakeLockEnabled.checked = state.wakeLockEnabled;
@@ -1098,6 +1163,7 @@
 
   el.trackName.addEventListener("input", function(){ state.trackName = this.value; saveState(); });
   el.placeName.addEventListener("input", function(){ state.placeName = this.value; saveState(); updateUI(false); });
+  if(el.markerCategory){ el.markerCategory.addEventListener("change", function(){ state.markerCategory = this.value; saveState(); updateUI(false); }); }
   el.applyPlaceNameBtn.addEventListener("click", function(){ applyPlaceNameToCurrent(); });
   el.renameBtn.addEventListener("click", function(){ state.trackName = "track-" + new Date().toISOString().slice(0,16).replace(/[:T]/g,"-"); updateUI(); });
   el.startBtn.addEventListener("click", startGps);
