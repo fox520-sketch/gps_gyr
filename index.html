@@ -312,6 +312,8 @@
     imuScale: $("imuScale"),
     imuFilterAlpha: $("imuFilterAlpha"),
     imuCalibrationStep: $("imuCalibrationStep"),
+    imuPointIntervalSec: $("imuPointIntervalSec"),
+    imuMaxStepMeters: $("imuMaxStepMeters"),
     exportFormat: $("exportFormat"),
     exportBtn: $("exportBtn"),
     exportFullBtn: $("exportFullBtn"),
@@ -350,6 +352,8 @@
       imuScale: state.imuScale,
       imuFilterAlpha: state.imuFilterAlpha,
       imuCalibrationStep: state.imuCalibrationStep,
+      imuPointIntervalSec: state.imuPointIntervalSec,
+      imuMaxStepMeters: state.imuMaxStepMeters,
       exportFormat: state.exportFormat,
       markerCategory: state.markerCategory,
       imuStillCounter: state.imuStillCounter,
@@ -776,6 +780,16 @@
     updateUI();
   }
 
+  function clampImuStep(baseLatLng, northMeters, eastMeters){
+    const maxStep = Math.max(0.1, Number(state.imuMaxStepMeters) || 1);
+    const dist = Math.hypot(northMeters, eastMeters);
+    if(dist <= maxStep){
+      return offsetLatLng(baseLatLng, northMeters, eastMeters);
+    }
+    const ratio = maxStep / dist;
+    return offsetLatLng(baseLatLng, northMeters * ratio, eastMeters * ratio);
+  }
+
   function addGpsPosition(pos){
     const gpsPoint = {
       lat: pos.coords.latitude,
@@ -874,7 +888,11 @@
       posEast: 0,
       lastTs: null,
       fx: 0,
-      fy: 0
+      fy: 0,
+      lastEmitAt: null,
+      lastEmitLatLng: null,
+      pendingNorth: 0,
+      pendingEast: 0
     };
 
     state.imuOrientationHandler = function(evt){
@@ -889,7 +907,11 @@
 
       const s = state.imuSession;
       const ts = evt.timeStamp || performance.now();
-      if(s.lastTs === null){ s.lastTs = ts; return; }
+      if(s.lastTs === null){
+        s.lastTs = ts;
+        s.lastEmitAt = Date.now();
+        return;
+      }
 
       const dt = (ts - s.lastTs) / 1000;
       s.lastTs = ts;
@@ -919,7 +941,6 @@
       if(state.imuStillCounter >= 50){
         s.velocityNorth = 0;
         s.velocityEast = 0;
-        return;
       }
 
       const heading = (state.orientationHeading || 0) * Math.PI / 180;
@@ -935,19 +956,38 @@
         return;
       }
 
-      s.posNorth += s.velocityNorth * dt;
-      s.posEast += s.velocityEast * dt;
+      s.pendingNorth += s.velocityNorth * dt;
+      s.pendingEast += s.velocityEast * dt;
       state.imuLastMoveAt = Date.now();
 
-      if(state.imuLastAcceptedAt && Date.now() - state.imuLastAcceptedAt < 40){
+      const emitIntervalMs = Math.max(1000, (Number(state.imuPointIntervalSec) || 10) * 1000);
+      if(!s.lastEmitAt) s.lastEmitAt = Date.now();
+      if(Date.now() - s.lastEmitAt < emitIntervalMs){
         return;
       }
-      state.imuLastAcceptedAt = Date.now();
 
-      const ll = offsetLatLng(s.anchor, s.posNorth, s.posEast);
+      let baseLatLng = s.lastEmitLatLng;
+      if(!baseLatLng){
+        if(state.imuPoints.length){
+          const lastImu = state.imuPoints[state.imuPoints.length - 1];
+          baseLatLng = { lat: lastImu.lat, lng: lastImu.lng };
+        }else{
+          baseLatLng = s.anchor;
+        }
+      }
+
+      const nextLL = clampImuStep(baseLatLng, s.pendingNorth, s.pendingEast);
+      const movedMeters = haversine(baseLatLng, nextLL);
+      if(movedMeters <= 0){
+        s.lastEmitAt = Date.now();
+        s.pendingNorth = 0;
+        s.pendingEast = 0;
+        return;
+      }
+
       addPoint({
-        lat: ll.lat,
-        lng: ll.lng,
+        lat: nextLL.lat,
+        lng: nextLL.lng,
         accuracy: null,
         altitude: null,
         speed: speed,
@@ -956,6 +996,11 @@
         sourceMode: "imu",
         placeName: state.placeName
       });
+
+      s.lastEmitLatLng = { lat: nextLL.lat, lng: nextLL.lng };
+      s.lastEmitAt = Date.now();
+      s.pendingNorth = 0;
+      s.pendingEast = 0;
     };
 
     window.addEventListener("deviceorientation", state.imuOrientationHandler, { passive:true });
@@ -1218,6 +1263,8 @@
     el.imuScale.value = String(state.imuScale);
     el.imuFilterAlpha.value = String(state.imuFilterAlpha);
     if(el.imuCalibrationStep) el.imuCalibrationStep.value = String(state.imuCalibrationStep);
+    if(el.imuPointIntervalSec) el.imuPointIntervalSec.value = String(state.imuPointIntervalSec);
+    if(el.imuMaxStepMeters) el.imuMaxStepMeters.value = String(state.imuMaxStepMeters);
     el.exportFormat.value = state.exportFormat;
     el.showGpsLine.checked = state.showGpsLine;
     el.showImuLine.checked = state.showImuLine;
