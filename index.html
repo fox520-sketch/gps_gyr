@@ -1058,37 +1058,42 @@
 
   function calibrateImu(){
     const gpsRef = state.lastGpsFix || (state.gpsPoints.length ? state.gpsPoints[state.gpsPoints.length - 1] : null);
-    if(!state.imuPoints.length || !gpsRef){
-      state.error = "需要先有 IMU 軌跡與 GPS 定位點才能校準。";
+    if(!gpsRef){
+      state.error = "需要先有 GPS 定位點才能校準。";
       updateUI();
       return;
     }
 
-    const lastImu = state.imuPoints[state.imuPoints.length - 1];
-    const rawLatDelta = gpsRef.lat - lastImu.lat;
-    const rawLngDelta = gpsRef.lng - lastImu.lng;
-    const step = Math.max(0.05, Math.min(1, Number(state.imuCalibrationStep) || 0.15));
-    const dLat = rawLatDelta * step;
-    const dLng = rawLngDelta * step;
+    // 在 IMU 軌跡最後「新增一個貼到 GPS 的點」
+    const newPoint = {
+      lat: gpsRef.lat,
+      lng: gpsRef.lng,
+      accuracy: null,
+      altitude: null,
+      speed: 0,
+      heading: state.orientationHeading,
+      timestamp: Date.now(),
+      sourceMode: "imu",
+      placeName: state.placeName
+    };
 
-    for(let i=0;i<state.imuPoints.length;i++){
-      state.imuPoints[i] = Object.assign({}, state.imuPoints[i], {
-        lat: state.imuPoints[i].lat + dLat,
-        lng: state.imuPoints[i].lng + dLng
-      });
-    }
+    addPoint(newPoint);
 
+    // 同步更新 IMU session anchor，讓後續計算從這個點繼續
     if(state.imuSession){
-      state.imuSession.anchor = {
-        lat: state.imuSession.anchor.lat + dLat,
-        lng: state.imuSession.anchor.lng + dLng
-      };
+      state.imuSession.anchor = { lat: gpsRef.lat, lng: gpsRef.lng };
+      state.imuSession.posNorth = 0;
+      state.imuSession.posEast = 0;
+      state.imuSession.velocityNorth = 0;
+      state.imuSession.velocityEast = 0;
+      state.imuSession.pendingNorth = 0;
+      state.imuSession.pendingEast = 0;
+      state.imuSession.lastEmitLatLng = { lat: gpsRef.lat, lng: gpsRef.lng };
     }
 
-    state.points = state.gpsPoints.concat(state.imuPoints).sort(function(a,b){ return a.timestamp - b.timestamp; });
     state.error = "";
     saveState();
-    updateUI(false);
+    updateUI();
   }
 
   function updateCurrentPosition(){
