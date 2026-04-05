@@ -476,14 +476,14 @@
       return padT + ((height - padT - padB) * (1 - ((vv - minV) / spanV)));
     }
 
-    const yTicks = 4;
     let grid = '';
+    const yTicks = 4;
     for(let i=0;i<=yTicks;i++){
       const ratio = i / yTicks;
       const y = padT + ((height - padT - padB) * ratio);
       const value = maxV - (spanV * ratio);
-      grid += '<line x1="' + padL + '" y1="' + y + '" x2="' + (width-padR) + '" y2="' + y + '" stroke="#e2e8f0" stroke-width="1" />'
-           +  '<text x="' + (padL-6) + '" y="' + (y+4) + '" text-anchor="end" fill="#64748b" font-size="11">' + value.toFixed(1) + (i===0 ? ' ' + yUnit : '') + '</text>';
+      grid += '<line x1="' + padL + '" y1="' + y + '" x2="' + (width-padR) + '" y2="' + y + '" stroke="#e2e8f0" stroke-width="1" />' +
+              '<text x="' + (padL-6) + '" y="' + (y+4) + '" text-anchor="end" fill="#64748b" font-size="11">' + value.toFixed(1) + (i===0 ? ' ' + yUnit : '') + '</text>';
     }
 
     const xTicks = 4;
@@ -491,14 +491,13 @@
       const ratio = i / xTicks;
       const t = minT + spanT * ratio;
       const x = xFor(t);
-      grid += '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (height-padB) + '" stroke="#f1f5f9" stroke-width="1" />'
-           +  '<text x="' + x + '" y="' + (height-8) + '" text-anchor="middle" fill="#64748b" font-size="11">' + formatAxisTime(t - minT) + '</text>';
+      grid += '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (height-padB) + '" stroke="#f1f5f9" stroke-width="1" />' +
+              '<text x="' + x + '" y="' + (height-8) + '" text-anchor="middle" fill="#64748b" font-size="11">' + formatAxisTime(t - minT) + '</text>';
     }
 
     const pts = values.map(function(v, i){
       return [xFor(timestamps[i]), yFor(v)];
     });
-
     const line = pts.map(function(p){ return p[0] + ',' + p[1]; }).join(' ');
     const area = 'M ' + pts[0][0] + ' ' + (height - padB) + ' ' +
       pts.map(function(p){ return 'L ' + p[0] + ' ' + p[1]; }).join(' ') +
@@ -534,21 +533,6 @@
       "#16a34a",
       "rgba(22,163,74,.15)",
       "m"
-    );
-  }
-
-  function updateCharts(){
-    drawLineChart(
-      el.speedChart,
-      state.points.map(function(p){ return Number.isFinite(p.speed) ? p.speed * 3.6 : NaN; }),
-      "#2563eb",
-      "rgba(37,99,235,.15)"
-    );
-    drawLineChart(
-      el.altChart,
-      state.points.map(function(p){ return Number(p.altitude); }),
-      "#16a34a",
-      "rgba(22,163,74,.15)"
     );
   }
 
@@ -754,8 +738,36 @@
     updateUI();
   }
 
+  function alignImuToGps(gpsPoint){
+    if(!state.imuEnabled || !state.imuPoints.length) return;
+    if(!gpsPoint || !Number.isFinite(gpsPoint.lat) || !Number.isFinite(gpsPoint.lng)) return;
+    if(Number.isFinite(gpsPoint.accuracy) && gpsPoint.accuracy > 30) return;
+
+    const lastImu = state.imuPoints[state.imuPoints.length - 1];
+    const dLat = gpsPoint.lat - lastImu.lat;
+    const dLng = gpsPoint.lng - lastImu.lng;
+
+    state.imuPoints = state.imuPoints.map(function(p){
+      return Object.assign({}, p, { lat: p.lat + dLat, lng: p.lng + dLng });
+    });
+
+    if(state.imuSession){
+      state.imuSession.anchor = {
+        lat: state.imuSession.anchor.lat + dLat,
+        lng: state.imuSession.anchor.lng + dLng
+      };
+      // GPS 存在時把 IMU 相對位移清小一點，避免持續漂移
+      state.imuSession.posNorth *= 0.2;
+      state.imuSession.posEast *= 0.2;
+      state.imuSession.velocityNorth *= 0.2;
+      state.imuSession.velocityEast *= 0.2;
+    }
+
+    state.points = state.gpsPoints.concat(state.imuPoints).sort(function(a,b){ return a.timestamp - b.timestamp; });
+  }
+
   function addGpsPosition(pos){
-    addPoint({
+    const gpsPoint = {
       lat: pos.coords.latitude,
       lng: pos.coords.longitude,
       accuracy: pos.coords.accuracy,
@@ -765,7 +777,22 @@
       timestamp: pos.timestamp,
       sourceMode: "gps",
       placeName: state.placeName
-    });
+    };
+    addPoint(gpsPoint);
+
+    if(state.imuEnabled){
+      if(state.imuSession && (!state.imuPoints.length)){
+        state.imuSession.anchor = { lat: gpsPoint.lat, lng: gpsPoint.lng };
+        state.imuSession.posNorth = 0;
+        state.imuSession.posEast = 0;
+        state.imuSession.velocityNorth = 0;
+        state.imuSession.velocityEast = 0;
+      }else{
+        alignImuToGps(gpsPoint);
+      }
+      saveState();
+      updateUI(false);
+    }
   }
 
   function startGps(){
@@ -1209,11 +1236,11 @@
     else { el.recordBadge.textContent = "Idle"; el.recordBadge.className = "badge"; }
 
     const latest = latestPoint();
-    const imuTune = state.imuEnabled ? "；IMU防漂移已啟用" : ""; const hiddenInfo = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
+    const imuTune = state.imuEnabled ? "；IMU防漂移已啟用" : ""; const imuOverlay = (state.imuEnabled && state.gpsEnabled) ? "；戶外 GPS 輔助對齊已啟用" : ""; const hiddenInfo = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
     const title = state.error || (state.isRecording ? "正在記錄" : "尚未開始");
     const text = latest
-      ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune
-      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune;
+      ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay
+      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay;
     el.statusBox.innerHTML = "<strong>" + escapeHtml(title) + "</strong><span>" + escapeHtml(text) + "</span>";
 
     renderPoints();
