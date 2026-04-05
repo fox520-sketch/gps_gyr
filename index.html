@@ -174,6 +174,7 @@
       <div class="group"><label for="minDistance">GPS 最小記錄距離（公尺）</label><input id="minDistance" class="input" type="number" min="0" step="1" value="5"></div>
       <div class="group"><label for="imuScale">陀螺儀推估倍率</label><input id="imuScale" class="input" type="number" min="0.1" step="0.1" value="1.0"></div>
       <div class="group"><label for="imuFilterAlpha">陀螺儀濾波係數</label><input id="imuFilterAlpha" class="input" type="number" min="0" max="0.99" step="0.01" value="0.96"></div>
+      <div class="group"><label for="imuCalibrationStep">校準逼近比例</label><input id="imuCalibrationStep" class="input" type="number" min="0.05" max="1" step="0.05" value="0.35"></div>
     </div>
 
     <div class="tab-panel" id="tab-export">
@@ -247,6 +248,7 @@
     minDistance: 5,
     imuScale: 1,
     imuFilterAlpha: 0.96,
+    imuCalibrationStep: 0.35,
     exportFormat: "gpx",
     markerCategory: "default",
     startedAt: null,
@@ -309,6 +311,7 @@
     minDistance: $("minDistance"),
     imuScale: $("imuScale"),
     imuFilterAlpha: $("imuFilterAlpha"),
+    imuCalibrationStep: $("imuCalibrationStep"),
     exportFormat: $("exportFormat"),
     exportBtn: $("exportBtn"),
     exportFullBtn: $("exportFullBtn"),
@@ -346,6 +349,7 @@
       minDistance: state.minDistance,
       imuScale: state.imuScale,
       imuFilterAlpha: state.imuFilterAlpha,
+      imuCalibrationStep: state.imuCalibrationStep,
       exportFormat: state.exportFormat,
       markerCategory: state.markerCategory,
       imuStillCounter: state.imuStillCounter,
@@ -516,11 +520,45 @@
       (Number.isFinite(lastValue) ? '<text x="' + Math.min(width-4, last[0] + 8) + '" y="' + Math.max(14, last[1] - 8) + '" fill="#334155" font-size="11">' + lastValue.toFixed(1) + ' ' + yUnit + '</text>' : '');
   }
 
+  function buildSpeedSeries(points){
+    if(!points.length) return [];
+    const series = [];
+    for(let i=0;i<points.length;i++){
+      const p = points[i];
+      if(Number.isFinite(p.speed)){
+        series.push(p.speed * 3.6);
+        continue;
+      }
+      if(i === 0){
+        series.push(0);
+        continue;
+      }
+      const prev = points[i-1];
+      const dt = Math.max(0.001, ((Number(p.timestamp)||0) - (Number(prev.timestamp)||0)) / 1000);
+      const dist = haversine(prev, p);
+      series.push((dist / dt) * 3.6);
+    }
+    return series;
+  }
+
+  function buildAltitudeSeries(points){
+    let last = null;
+    const series = points.map(function(p){
+      const alt = Number(p.altitude);
+      if(Number.isFinite(alt)){
+        last = alt;
+        return alt;
+      }
+      return last;
+    });
+    return series;
+  }
+
   function updateCharts(){
     const timestamps = state.points.map(function(p){ return Number(p.timestamp) || 0; });
     drawLineChart(
       el.speedChart,
-      state.points.map(function(p){ return Number.isFinite(p.speed) ? p.speed * 3.6 : NaN; }),
+      buildSpeedSeries(state.points),
       timestamps,
       "#2563eb",
       "rgba(37,99,235,.15)",
@@ -528,7 +566,7 @@
     );
     drawLineChart(
       el.altChart,
-      state.points.map(function(p){ return Number(p.altitude); }),
+      buildAltitudeSeries(state.points),
       timestamps,
       "#16a34a",
       "rgba(22,163,74,.15)",
@@ -738,34 +776,6 @@
     updateUI();
   }
 
-  function alignImuToGps(gpsPoint){
-    if(!state.imuEnabled || !state.imuPoints.length) return;
-    if(!gpsPoint || !Number.isFinite(gpsPoint.lat) || !Number.isFinite(gpsPoint.lng)) return;
-    if(Number.isFinite(gpsPoint.accuracy) && gpsPoint.accuracy > 30) return;
-
-    const lastImu = state.imuPoints[state.imuPoints.length - 1];
-    const dLat = gpsPoint.lat - lastImu.lat;
-    const dLng = gpsPoint.lng - lastImu.lng;
-
-    state.imuPoints = state.imuPoints.map(function(p){
-      return Object.assign({}, p, { lat: p.lat + dLat, lng: p.lng + dLng });
-    });
-
-    if(state.imuSession){
-      state.imuSession.anchor = {
-        lat: state.imuSession.anchor.lat + dLat,
-        lng: state.imuSession.anchor.lng + dLng
-      };
-      // GPS 存在時把 IMU 相對位移清小一點，避免持續漂移
-      state.imuSession.posNorth *= 0.2;
-      state.imuSession.posEast *= 0.2;
-      state.imuSession.velocityNorth *= 0.2;
-      state.imuSession.velocityEast *= 0.2;
-    }
-
-    state.points = state.gpsPoints.concat(state.imuPoints).sort(function(a,b){ return a.timestamp - b.timestamp; });
-  }
-
   function addGpsPosition(pos){
     const gpsPoint = {
       lat: pos.coords.latitude,
@@ -780,16 +790,13 @@
     };
     addPoint(gpsPoint);
 
-    if(state.imuEnabled){
-      if(state.imuSession && (!state.imuPoints.length)){
-        state.imuSession.anchor = { lat: gpsPoint.lat, lng: gpsPoint.lng };
-        state.imuSession.posNorth = 0;
-        state.imuSession.posEast = 0;
-        state.imuSession.velocityNorth = 0;
-        state.imuSession.velocityEast = 0;
-      }else{
-        alignImuToGps(gpsPoint);
-      }
+    // 只在剛啟動 IMU 且尚未生成 IMU 點時，用 GPS 當作 IMU 原始起點；之後不自動修正原始紫線
+    if(state.imuEnabled && state.imuSession && (!state.imuPoints.length)){
+      state.imuSession.anchor = { lat: gpsPoint.lat, lng: gpsPoint.lng };
+      state.imuSession.posNorth = 0;
+      state.imuSession.posEast = 0;
+      state.imuSession.velocityNorth = 0;
+      state.imuSession.velocityEast = 0;
       saveState();
       updateUI(false);
     }
@@ -886,44 +893,32 @@
 
       const dt = (ts - s.lastTs) / 1000;
       s.lastTs = ts;
-      if(!Number.isFinite(dt) || dt <= 0 || dt > 0.2) return;
+      if(!Number.isFinite(dt) || dt <= 0 || dt > 0.25) return;
 
       const a = evt.acceleration || evt.accelerationIncludingGravity;
       if(!a) return;
 
       state.imuLastAccel = { x:Number(a.x||0), y:Number(a.y||0), z:Number(a.z||0) };
 
-      const alpha = Math.max(0, Math.min(0.995, Number(state.imuFilterAlpha)||0.96));
+      // 保留原始紫線：濾波較輕，不做 GPS 自動疊合，只在按校準時修正
+      const alpha = Math.max(0, Math.min(0.99, Number(state.imuFilterAlpha) || 0.96));
       s.fx = alpha * s.fx + (1 - alpha) * Number(a.x || 0);
       s.fy = alpha * s.fy + (1 - alpha) * Number(a.y || 0);
 
       const mag = Math.hypot(s.fx, s.fy);
-
-      // 靜止判斷：小幅雜訊不累積位移
-      if(mag < 0.025){
+      if(mag < 0.02){
         state.imuStillCounter += 1;
       }else{
         state.imuStillCounter = 0;
       }
 
-      // 連續接近靜止時，快速衰減速度
-      if(state.imuStillCounter >= 3){
-        s.velocityNorth *= 0.18;
-        s.velocityEast *= 0.18;
+      if(state.imuStillCounter >= 5){
+        s.velocityNorth *= 0.5;
+        s.velocityEast *= 0.5;
       }
-
-      // 長一點時間靜止就直接鎖住，避免原地漂移
-      if(state.imuStillCounter >= 6){
+      if(state.imuStillCounter >= 12){
         s.velocityNorth = 0;
         s.velocityEast = 0;
-      }
-
-      if(state.imuStillCounter >= 10){
-        return;
-      }
-
-      // 不到明顯移動門檻就不畫點
-      if(mag < 0.04){
         return;
       }
 
@@ -931,14 +926,12 @@
       const northAcc = (s.fy * Math.cos(heading) - s.fx * Math.sin(heading)) * state.imuScale;
       const eastAcc = (s.fy * Math.sin(heading) + s.fx * Math.cos(heading)) * state.imuScale;
 
-      s.velocityNorth = (s.velocityNorth + northAcc * dt) * 0.60;
-      s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.60;
+      s.velocityNorth = (s.velocityNorth + northAcc * dt) * 0.82;
+      s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.82;
 
       const speed = Math.hypot(s.velocityNorth, s.velocityEast);
 
-      if(speed < 0.03){
-        s.velocityNorth = 0;
-        s.velocityEast = 0;
+      if(speed < 0.012 && mag < 0.03){
         return;
       }
 
@@ -946,8 +939,7 @@
       s.posEast += s.velocityEast * dt;
       state.imuLastMoveAt = Date.now();
 
-      // 限制寫點頻率，避免點數暴增
-      if(state.imuLastAcceptedAt && Date.now() - state.imuLastAcceptedAt < 500){
+      if(state.imuLastAcceptedAt && Date.now() - state.imuLastAcceptedAt < 250){
         return;
       }
       state.imuLastAcceptedAt = Date.now();
@@ -1026,20 +1018,28 @@
       updateUI();
       return;
     }
+
     const lastImu = state.imuPoints[state.imuPoints.length - 1];
-    const dLat = gpsRef.lat - lastImu.lat;
-    const dLng = gpsRef.lng - lastImu.lng;
+    const rawLatDelta = gpsRef.lat - lastImu.lat;
+    const rawLngDelta = gpsRef.lng - lastImu.lng;
+    const step = Math.max(0.05, Math.min(1, Number(state.imuCalibrationStep) || 0.35));
+    const dLat = rawLatDelta * step;
+    const dLng = rawLngDelta * step;
+
     state.imuPoints = state.imuPoints.map(function(p){
       return Object.assign({}, p, { lat: p.lat + dLat, lng: p.lng + dLng });
     });
+
     if(state.imuSession){
       state.imuSession.anchor = {
         lat: state.imuSession.anchor.lat + dLat,
         lng: state.imuSession.anchor.lng + dLng
       };
     }
+
     state.points = state.gpsPoints.concat(state.imuPoints).sort(function(a,b){ return a.timestamp - b.timestamp; });
     state.error = "";
+    saveState();
     updateUI();
   }
 
@@ -1214,6 +1214,7 @@
     el.minDistance.value = String(state.minDistance);
     el.imuScale.value = String(state.imuScale);
     el.imuFilterAlpha.value = String(state.imuFilterAlpha);
+    if(el.imuCalibrationStep) el.imuCalibrationStep.value = String(state.imuCalibrationStep);
     el.exportFormat.value = state.exportFormat;
     el.showGpsLine.checked = state.showGpsLine;
     el.showImuLine.checked = state.showImuLine;
@@ -1236,7 +1237,7 @@
     else { el.recordBadge.textContent = "Idle"; el.recordBadge.className = "badge"; }
 
     const latest = latestPoint();
-    const imuTune = state.imuEnabled ? "；IMU防漂移已啟用" : ""; const imuOverlay = (state.imuEnabled && state.gpsEnabled) ? "；戶外 GPS 輔助對齊已啟用" : ""; const hiddenInfo = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
+    const imuTune = state.imuEnabled ? "；原始 IMU 紫線已啟用" : ""; const imuOverlay = state.imuEnabled ? "；可按校準逐次逼近 GPS" : ""; const hiddenInfo = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
     const title = state.error || (state.isRecording ? "正在記錄" : "尚未開始");
     const text = latest
       ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay
@@ -1425,6 +1426,7 @@
   el.minDistance.addEventListener("input", function(){ state.minDistance = Number(this.value || 0); saveState(); });
   el.imuScale.addEventListener("input", function(){ state.imuScale = Math.max(0.1, Number(this.value || 1)); saveState(); });
   el.imuFilterAlpha.addEventListener("input", function(){ state.imuFilterAlpha = Math.max(0, Math.min(0.99, Number(this.value || 0.85))); saveState(); });
+  if(el.imuCalibrationStep){ el.imuCalibrationStep.addEventListener("input", function(){ state.imuCalibrationStep = Math.max(0.05, Math.min(1, Number(this.value || 0.35))); saveState(); }); }
   el.showGpsLine.addEventListener("change", function(){ state.showGpsLine = this.checked; updateUI(); });
   el.showImuLine.addEventListener("change", function(){ state.showImuLine = this.checked; updateUI(); });
   el.exportFormat.addEventListener("change", function(){ state.exportFormat = this.value; saveState(); });
