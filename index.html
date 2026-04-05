@@ -201,7 +201,17 @@
 
     <div class="tab-panel" id="tab-points"><div id="pointsList" class="points"><div class="mini">目前還沒有任何紀錄點。</div></div></div>
     <div class="tab-panel" id="tab-history"><div class="btns"><button id="refreshHistoryBtn" class="btn secondary" type="button">重新整理</button><button id="clearHistoryBtn" class="btn danger" type="button">清空歷史</button></div><div id="historyList" class="history"><div class="mini">目前沒有保存的歷史軌跡。</div></div></div>
-    <div class="tab-panel" id="tab-charts"><div class="chart"><div class="mini">這版為了穩定先保留框架。</div></div></div>
+    <div class="tab-panel" id="tab-charts">
+      <div class="chart">
+        <label style="margin-bottom:8px">速度圖</label>
+        <svg id="speedChart" viewBox="0 0 600 170" preserveAspectRatio="none"></svg>
+      </div>
+      <div style="height:10px"></div>
+      <div class="chart">
+        <label style="margin-bottom:8px">海拔圖</label>
+        <svg id="altChart" viewBox="0 0 600 170" preserveAspectRatio="none"></svg>
+      </div>
+    </div>
 
     <div style="height:16px"></div>
     <div id="statusBox" class="alert"><strong>尚未開始</strong><span>按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。</span></div>
@@ -318,6 +328,8 @@
     statusBox: $("statusBox"),
     pointsList: $("pointsList"),
     historyList: $("historyList"),
+    speedChart: $("speedChart"),
+    altChart: $("altChart"),
     imuDebugText: $("imuDebugText"),
     tabBtns: Array.from(document.querySelectorAll(".tab-btn"))
   };
@@ -423,6 +435,57 @@
         <div>Lng: ${p.lng.toFixed(6)}</div>
       </div>
     `).join("");
+  }
+
+  function drawLineChart(svgEl, values, lineColor, fillColor){
+    if(!svgEl) return;
+    const width = 600, height = 170, pad = 16;
+    svgEl.innerHTML = "";
+
+    if(!values.length){
+      svgEl.innerHTML = '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#94a3b8" font-size="14">目前沒有資料</text>';
+      return;
+    }
+
+    const finite = values.filter(function(v){ return Number.isFinite(v); });
+    if(!finite.length){
+      svgEl.innerHTML = '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#94a3b8" font-size="14">此資料不可用</text>';
+      return;
+    }
+
+    const min = Math.min.apply(null, finite);
+    const max = Math.max.apply(null, finite);
+    const span = (max - min) || 1;
+
+    const pts = values.map(function(v, i){
+      const x = pad + ((width - pad * 2) * (values.length === 1 ? 0 : i / (values.length - 1)));
+      const y = pad + ((height - pad * 2) * (1 - (((Number.isFinite(v) ? v : min) - min) / span)));
+      return [x, y];
+    });
+
+    const line = pts.map(function(p){ return p[0] + ',' + p[1]; }).join(' ');
+    const area = 'M ' + pts[0][0] + ' ' + (height - pad) + ' ' +
+      pts.map(function(p){ return 'L ' + p[0] + ' ' + p[1]; }).join(' ') +
+      ' L ' + pts[pts.length - 1][0] + ' ' + (height - pad) + ' Z';
+
+    svgEl.innerHTML =
+      '<path d="' + area + '" fill="' + fillColor + '" />' +
+      '<polyline fill="none" stroke="' + lineColor + '" stroke-width="3" points="' + line + '" />';
+  }
+
+  function updateCharts(){
+    drawLineChart(
+      el.speedChart,
+      state.points.map(function(p){ return Number.isFinite(p.speed) ? p.speed * 3.6 : NaN; }),
+      "#2563eb",
+      "rgba(37,99,235,.15)"
+    );
+    drawLineChart(
+      el.altChart,
+      state.points.map(function(p){ return Number(p.altitude); }),
+      "#16a34a",
+      "rgba(22,163,74,.15)"
+    );
   }
 
   function updateStats(){
@@ -1092,6 +1155,7 @@
     renderPoints();
     renderHistory();
     renderMap();
+    updateCharts();
     updateImuDebug();
     if(save) saveState();
   }
