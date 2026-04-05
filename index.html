@@ -314,6 +314,11 @@
     imuCalibrationStep: $("imuCalibrationStep"),
     imuPointIntervalSec: $("imuPointIntervalSec"),
     imuMaxStepMeters: $("imuMaxStepMeters"),
+    indoorMode: $("indoorMode"),
+    autoCalibrateImu: $("autoCalibrateImu"),
+    autoCalibrateIntervalSec: $("autoCalibrateIntervalSec"),
+    autoCalibrateMaxAccuracy: $("autoCalibrateMaxAccuracy"),
+    orientationSmoothingAlpha: $("orientationSmoothingAlpha"),
     exportFormat: $("exportFormat"),
     exportBtn: $("exportBtn"),
     exportFullBtn: $("exportFullBtn"),
@@ -354,6 +359,12 @@
       imuCalibrationStep: state.imuCalibrationStep,
       imuPointIntervalSec: state.imuPointIntervalSec,
       imuMaxStepMeters: state.imuMaxStepMeters,
+      autoCalibrateImu: state.autoCalibrateImu,
+      autoCalibrateIntervalSec: state.autoCalibrateIntervalSec,
+      autoCalibrateMaxAccuracy: state.autoCalibrateMaxAccuracy,
+      indoorMode: state.indoorMode,
+      lastAutoCalibrateAt: state.lastAutoCalibrateAt,
+      orientationSmoothingAlpha: state.orientationSmoothingAlpha,
       exportFormat: state.exportFormat,
       markerCategory: state.markerCategory,
       imuStillCounter: state.imuStillCounter,
@@ -780,6 +791,56 @@
     updateUI();
   }
 
+  function smoothHeading(current, target, alpha){
+    if(!Number.isFinite(current)) return target;
+    if(!Number.isFinite(target)) return current;
+    let diff = ((target - current + 540) % 360) - 180;
+    return (current + diff * (1 - alpha) + 360) % 360;
+  }
+
+  function appendImuCalibrationPoint(gpsRef, reason){
+    if(!gpsRef || !Number.isFinite(gpsRef.lat) || !Number.isFinite(gpsRef.lng)) return false;
+    const point = {
+      lat: gpsRef.lat,
+      lng: gpsRef.lng,
+      accuracy: null,
+      altitude: null,
+      speed: 0,
+      heading: state.orientationHeading,
+      timestamp: Date.now(),
+      sourceMode: "imu",
+      placeName: state.placeName,
+      calibrationReason: reason || "auto"
+    };
+    addPoint(point);
+
+    if(state.imuSession){
+      state.imuSession.anchor = { lat: gpsRef.lat, lng: gpsRef.lng };
+      state.imuSession.posNorth = 0;
+      state.imuSession.posEast = 0;
+      state.imuSession.velocityNorth = 0;
+      state.imuSession.velocityEast = 0;
+      state.imuSession.pendingNorth = 0;
+      state.imuSession.pendingEast = 0;
+      state.imuSession.lastEmitLatLng = { lat: gpsRef.lat, lng: gpsRef.lng };
+      state.imuSession.lastEmitAt = Date.now();
+    }
+    state.lastAutoCalibrateAt = Date.now();
+    return true;
+  }
+
+  function maybeAutoCalibrateImu(gpsRef){
+    if(!state.autoCalibrateImu || !state.imuEnabled || !state.gpsEnabled) return;
+    if(!gpsRef || !Number.isFinite(gpsRef.lat) || !Number.isFinite(gpsRef.lng)) return;
+    const maxAcc = Math.max(3, Number(state.autoCalibrateMaxAccuracy) || 12);
+    if(Number.isFinite(gpsRef.accuracy) && gpsRef.accuracy > maxAcc) return;
+
+    const minIntervalMs = Math.max(2000, (Number(state.autoCalibrateIntervalSec) || 8) * 1000);
+    if(state.lastAutoCalibrateAt && (Date.now() - state.lastAutoCalibrateAt) < minIntervalMs) return;
+
+    appendImuCalibrationPoint(gpsRef, "auto");
+  }
+
   function clampImuStep(baseLatLng, northMeters, eastMeters){
     const maxStep = Math.max(0.1, Number(state.imuMaxStepMeters) || 1);
     const dist = Math.hypot(northMeters, eastMeters);
@@ -804,16 +865,22 @@
     };
     addPoint(gpsPoint);
 
-    // 只在剛啟動 IMU 且尚未生成 IMU 點時，用 GPS 當作 IMU 原始起點；之後不自動修正原始紫線
     if(state.imuEnabled && state.imuSession && (!state.imuPoints.length)){
       state.imuSession.anchor = { lat: gpsPoint.lat, lng: gpsPoint.lng };
       state.imuSession.posNorth = 0;
       state.imuSession.posEast = 0;
       state.imuSession.velocityNorth = 0;
       state.imuSession.velocityEast = 0;
-      saveState();
-      updateUI(false);
+      state.imuSession.pendingNorth = 0;
+      state.imuSession.pendingEast = 0;
+      state.imuSession.lastEmitLatLng = { lat: gpsPoint.lat, lng: gpsPoint.lng };
+      state.imuSession.lastEmitAt = Date.now();
     }
+
+    maybeAutoCalibrateImu(gpsPoint);
+
+    saveState();
+    updateUI(false);
   }
 
   function startGps(){
@@ -896,8 +963,13 @@
     };
 
     state.imuOrientationHandler = function(evt){
-      if(typeof evt.webkitCompassHeading === "number") state.orientationHeading = evt.webkitCompassHeading;
-      else if(Number.isFinite(evt.alpha)) state.orientationHeading = 360 - evt.alpha;
+      let rawHeading = null;
+      if(typeof evt.webkitCompassHeading === "number") rawHeading = evt.webkitCompassHeading;
+      else if(Number.isFinite(evt.alpha)) rawHeading = 360 - evt.alpha;
+      if(Number.isFinite(rawHeading)){
+        const alpha = Math.max(0, Math.min(0.99, Number(state.orientationSmoothingAlpha) || 0.85));
+        state.orientationHeading = smoothHeading(state.orientationHeading, rawHeading, alpha);
+      }
     };
 
     state.imuMotionHandler = function(evt){
@@ -1063,34 +1135,7 @@
       updateUI();
       return;
     }
-
-    // 在 IMU 軌跡最後「新增一個貼到 GPS 的點」
-    const newPoint = {
-      lat: gpsRef.lat,
-      lng: gpsRef.lng,
-      accuracy: null,
-      altitude: null,
-      speed: 0,
-      heading: state.orientationHeading,
-      timestamp: Date.now(),
-      sourceMode: "imu",
-      placeName: state.placeName
-    };
-
-    addPoint(newPoint);
-
-    // 同步更新 IMU session anchor，讓後續計算從這個點繼續
-    if(state.imuSession){
-      state.imuSession.anchor = { lat: gpsRef.lat, lng: gpsRef.lng };
-      state.imuSession.posNorth = 0;
-      state.imuSession.posEast = 0;
-      state.imuSession.velocityNorth = 0;
-      state.imuSession.velocityEast = 0;
-      state.imuSession.pendingNorth = 0;
-      state.imuSession.pendingEast = 0;
-      state.imuSession.lastEmitLatLng = { lat: gpsRef.lat, lng: gpsRef.lng };
-    }
-
+    appendImuCalibrationPoint(gpsRef, "manual");
     state.error = "";
     saveState();
     updateUI();
@@ -1270,6 +1315,11 @@
     if(el.imuCalibrationStep) el.imuCalibrationStep.value = String(state.imuCalibrationStep);
     if(el.imuPointIntervalSec) el.imuPointIntervalSec.value = String(state.imuPointIntervalSec);
     if(el.imuMaxStepMeters) el.imuMaxStepMeters.value = String(state.imuMaxStepMeters);
+    if(el.indoorMode) el.indoorMode.checked = !!state.indoorMode;
+    if(el.autoCalibrateImu) el.autoCalibrateImu.checked = !!state.autoCalibrateImu;
+    if(el.autoCalibrateIntervalSec) el.autoCalibrateIntervalSec.value = String(state.autoCalibrateIntervalSec);
+    if(el.autoCalibrateMaxAccuracy) el.autoCalibrateMaxAccuracy.value = String(state.autoCalibrateMaxAccuracy);
+    if(el.orientationSmoothingAlpha) el.orientationSmoothingAlpha.value = String(state.orientationSmoothingAlpha);
     el.exportFormat.value = state.exportFormat;
     el.showGpsLine.checked = state.showGpsLine;
     el.showImuLine.checked = state.showImuLine;
@@ -1295,8 +1345,8 @@
     const imuTune = state.imuEnabled ? "；原始 IMU 紫線已啟用" : ""; const imuOverlay = state.imuEnabled ? "；可按校準逐次逼近 GPS" : ""; const hiddenInfo = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
     const title = state.error || (state.isRecording ? "正在記錄" : "尚未開始");
     const text = latest
-      ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay
-      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay;
+      ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay + autoCal
+      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay + autoCal;
     el.statusBox.innerHTML = "<strong>" + escapeHtml(title) + "</strong><span>" + escapeHtml(text) + "</span>";
 
     renderPoints();
