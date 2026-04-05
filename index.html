@@ -322,6 +322,10 @@
     autoCalibrateIntervalSec: $("autoCalibrateIntervalSec"),
     autoCalibrateMaxAccuracy: $("autoCalibrateMaxAccuracy"),
     orientationSmoothingAlpha: $("orientationSmoothingAlpha"),
+    imuUseStepDetection: $("imuUseStepDetection"),
+    stepLengthMeters: $("stepLengthMeters"),
+    stepDetectThreshold: $("stepDetectThreshold"),
+    stepMinIntervalMs: $("stepMinIntervalMs"),
     exportFormat: $("exportFormat"),
     exportBtn: $("exportBtn"),
     exportFullBtn: $("exportFullBtn"),
@@ -367,6 +371,10 @@
       autoCalibrateIntervalSec: state.autoCalibrateIntervalSec,
       autoCalibrateMaxAccuracy: state.autoCalibrateMaxAccuracy,
       indoorMode: state.indoorMode,
+      imuUseStepDetection: state.imuUseStepDetection,
+      stepLengthMeters: state.stepLengthMeters,
+      stepDetectThreshold: state.stepDetectThreshold,
+      stepMinIntervalMs: state.stepMinIntervalMs,
       lastAutoCalibrateAt: state.lastAutoCalibrateAt,
       orientationSmoothingAlpha: state.orientationSmoothingAlpha,
       exportFormat: state.exportFormat,
@@ -796,6 +804,44 @@
     updateUI();
   }
 
+  function average(arr){
+    if(!arr || !arr.length) return 0;
+    return arr.reduce(function(a,b){ return a+b; }, 0) / arr.length;
+  }
+
+  function appendImuStepPoint(stepLength, headingDeg){
+    if(!state.imuSession) return;
+    let baseLatLng = state.imuSession.lastEmitLatLng;
+    if(!baseLatLng){
+      if(state.imuPoints.length){
+        const lastImu = state.imuPoints[state.imuPoints.length - 1];
+        baseLatLng = { lat: lastImu.lat, lng: lastImu.lng };
+      }else{
+        baseLatLng = state.imuSession.anchor;
+      }
+    }
+    const heading = (headingDeg || 0) * Math.PI / 180;
+    const north = Math.cos(heading) * stepLength;
+    const east = Math.sin(heading) * stepLength;
+    const nextLL = offsetLatLng(baseLatLng, north, east);
+
+    addPoint({
+      lat: nextLL.lat,
+      lng: nextLL.lng,
+      accuracy: null,
+      altitude: null,
+      speed: stepLength / Math.max(0.2, (Number(state.stepMinIntervalMs)||380)/1000),
+      heading: headingDeg,
+      timestamp: Date.now(),
+      sourceMode: "imu",
+      placeName: state.placeName
+    });
+
+    state.imuSession.lastEmitLatLng = { lat: nextLL.lat, lng: nextLL.lng };
+    state.imuSession.lastEmitAt = Date.now();
+    state.imuSession.stepCount = (state.imuSession.stepCount || 0) + 1;
+  }
+
   function smoothHeading(current, target, alpha){
     if(!Number.isFinite(current)) return target;
     if(!Number.isFinite(target)) return current;
@@ -1012,7 +1058,11 @@ async function requestImuPermission(){
       lastEmitAt: null,
       lastEmitLatLng: null,
       pendingNorth: 0,
-      pendingEast: 0
+      pendingEast: 0,
+      accelMagHistory: [],
+      lastStepAt: 0,
+      stepCount: 0,
+      baselineMag: 0
     };
 
     state.imuOrientationHandler = function(evt){
@@ -1043,28 +1093,49 @@ async function requestImuPermission(){
         s.lastEmitAt = Date.now();
         return;
       }
-
       const dt = (ts - s.lastTs) / 1000;
       s.lastTs = ts;
-      if(!Number.isFinite(dt) || dt <= 0 || dt > 0.3) return;
+      if(!Number.isFinite(dt) || dt <= 0 || dt > 0.35) return;
 
       const a = evt.acceleration || evt.accelerationIncludingGravity;
       if(!a) return;
 
       state.imuLastAccel = { x:Number(a.x||0), y:Number(a.y||0), z:Number(a.z||0) };
 
+      const ax = Number(a.x || 0), ay = Number(a.y || 0), az = Number(a.z || 0);
+      const mag = Math.hypot(ax, ay, az);
+
+      if(state.imuUseStepDetection){
+        s.accelMagHistory.push(mag);
+        if(s.accelMagHistory.length > 12) s.accelMagHistory.shift();
+
+        const baseline = average(s.accelMagHistory);
+        s.baselineMag = baseline;
+        const dynamic = Math.abs(mag - baseline);
+        const threshold = Math.max(0.05, Number(state.stepDetectThreshold) || 0.22);
+        const minStepGap = Math.max(200, Number(state.stepMinIntervalMs) || 380);
+
+        if(dynamic > threshold && (Date.now() - (s.lastStepAt || 0)) >= minStepGap){
+          s.lastStepAt = Date.now();
+          state.imuLastMoveAt = Date.now();
+          const stepLength = Math.max(0.2, Math.min(Number(state.imuMaxStepMeters) || 1, Number(state.stepLengthMeters) || 0.75));
+          appendImuStepPoint(stepLength, state.orientationHeading || 0);
+          state.imuStatusText = "已偵測步伐，正在用步行模式畫 IMU 軌跡。";
+        }
+        return;
+      }
+
+      // fallback: original timed emit if user turns step detection off
       const alpha = Math.max(0, Math.min(0.97, Number(state.imuFilterAlpha) || 0.82));
       s.fx = alpha * s.fx + (1 - alpha) * Number(a.x || 0);
       s.fy = alpha * s.fy + (1 - alpha) * Number(a.y || 0);
+      const mag2 = Math.hypot(s.fx, s.fy);
 
-      const mag = Math.hypot(s.fx, s.fy);
-
-      if(mag < 0.004){
+      if(mag2 < 0.004){
         state.imuStillCounter += 1;
       }else{
         state.imuStillCounter = 0;
       }
-
       if(state.imuStillCounter >= 25){
         s.velocityNorth *= 0.8;
         s.velocityEast *= 0.8;
@@ -1082,20 +1153,15 @@ async function requestImuPermission(){
       s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.97;
 
       const speed = Math.hypot(s.velocityNorth, s.velocityEast);
-
-      if(speed < 0.001 && mag < 0.006){
-        return;
-      }
+      if(speed < 0.001 && mag2 < 0.006) return;
 
       s.pendingNorth += s.velocityNorth * dt;
       s.pendingEast += s.velocityEast * dt;
       state.imuLastMoveAt = Date.now();
 
-      const emitIntervalMs = Math.max(1000, (Number(state.imuPointIntervalSec) || 10) * 1000);
+      const emitIntervalMs = Math.max(1000, (Number(state.imuPointIntervalSec) || 2) * 1000);
       if(!s.lastEmitAt) s.lastEmitAt = Date.now();
-      if(Date.now() - s.lastEmitAt < emitIntervalMs){
-        return;
-      }
+      if(Date.now() - s.lastEmitAt < emitIntervalMs) return;
 
       let baseLatLng = s.lastEmitLatLng;
       if(!baseLatLng){
@@ -1378,6 +1444,7 @@ async function requestImuPermission(){
     parts.push("權限：" + permissionText);
     parts.push("IMU 點位：" + state.imuPoints.length);
     parts.push("感測事件數：" + state.imuEventCount);
+    if(state.imuSession && Number.isFinite(state.imuSession.stepCount)) parts.push("步數：" + state.imuSession.stepCount);
     parts.push("靜止鎖定計數：" + state.imuStillCounter);
     parts.push("最後事件：" + (state.imuLastEventAt ? new Date(state.imuLastEventAt).toLocaleTimeString() : "--"));
     parts.push("最後移動：" + (state.imuLastMoveAt ? new Date(state.imuLastMoveAt).toLocaleTimeString() : "--"));
@@ -1416,6 +1483,10 @@ async function requestImuPermission(){
     if(el.autoCalibrateIntervalSec) el.autoCalibrateIntervalSec.value = String(state.autoCalibrateIntervalSec);
     if(el.autoCalibrateMaxAccuracy) el.autoCalibrateMaxAccuracy.value = String(state.autoCalibrateMaxAccuracy);
     if(el.orientationSmoothingAlpha) el.orientationSmoothingAlpha.value = String(state.orientationSmoothingAlpha);
+    if(el.imuUseStepDetection) el.imuUseStepDetection.checked = !!state.imuUseStepDetection;
+    if(el.stepLengthMeters) el.stepLengthMeters.value = String(state.stepLengthMeters);
+    if(el.stepDetectThreshold) el.stepDetectThreshold.value = String(state.stepDetectThreshold);
+    if(el.stepMinIntervalMs) el.stepMinIntervalMs.value = String(state.stepMinIntervalMs);
     el.exportFormat.value = state.exportFormat;
     el.showGpsLine.checked = state.showGpsLine;
     el.showImuLine.checked = state.showImuLine;
