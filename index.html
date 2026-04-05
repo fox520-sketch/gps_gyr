@@ -178,19 +178,24 @@
 
     <div class="tab-panel" id="tab-export">
       <div class="group">
-        <label for="exportFormat">匯出格式</label>
+        <label for="exportFormat">匯出軌跡格式</label>
         <select id="exportFormat" class="select">
           <option value="gpx">GPX</option>
           <option value="csv">CSV</option>
           <option value="json">JSON</option>
         </select>
-        <div style="margin-top:10px" class="btns"><button id="exportBtn" class="btn primary" type="button">匯出目前軌跡</button></div>
+        <div style="margin-top:10px" class="btns">
+          <button id="exportBtn" class="btn primary" type="button">匯出目前軌跡</button>
+          <button id="exportFullBtn" class="btn success" type="button">匯出完整備份</button>
+        </div>
+        <div class="mini" style="margin-top:8px;">完整備份會包含：GPS / IMU 軌跡、目前位置名稱、所有標記與分類。</div>
       </div>
       <div class="group">
-        <label>匯入 GPX</label>
+        <label>匯入資料</label>
         <div class="inline">
-          <input id="importFile" type="file" accept=".gpx,.xml">
+          <input id="importFile" type="file" accept=".gpx,.xml,.json">
         </div>
+        <div class="mini" style="margin-top:8px;">可匯入 GPX 軌跡，或匯入本 App 匯出的完整 JSON 備份。</div>
       </div>
     </div>
 
@@ -296,6 +301,7 @@
     imuFilterAlpha: $("imuFilterAlpha"),
     exportFormat: $("exportFormat"),
     exportBtn: $("exportBtn"),
+    exportFullBtn: $("exportFullBtn"),
     importFile: $("importFile"),
     refreshHistoryBtn: $("refreshHistoryBtn"),
     clearHistoryBtn: $("clearHistoryBtn"),
@@ -1100,6 +1106,63 @@
     URL.revokeObjectURL(url);
   }
 
+  function exportFullBackup(){
+    const payload = {
+      app: "gps_imu_track_recorder",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      trackName: state.trackName,
+      placeName: state.placeName,
+      points: state.points,
+      gpsPoints: state.gpsPoints,
+      imuPoints: state.imuPoints,
+      userMarkers: state.userMarkers,
+      markerCategory: state.markerCategory,
+      settings: {
+        showGpsLine: state.showGpsLine,
+        showImuLine: state.showImuLine,
+        followMap: state.followMap,
+        highAccuracy: state.highAccuracy,
+        wakeLockEnabled: state.wakeLockEnabled,
+        autoRecoverWatch: state.autoRecoverWatch,
+        aggressiveSave: state.aggressiveSave,
+        minDistance: state.minDistance,
+        imuScale: state.imuScale,
+        imuFilterAlpha: state.imuFilterAlpha,
+        exportFormat: state.exportFormat
+      }
+    };
+    exportText((state.trackName || "track") + "_backup.json", JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
+  }
+
+  function importFullBackup(obj){
+    state.trackName = obj.trackName || state.trackName;
+    state.placeName = obj.placeName || "";
+    state.points = Array.isArray(obj.points) ? obj.points : [];
+    state.gpsPoints = Array.isArray(obj.gpsPoints) ? obj.gpsPoints : [];
+    state.imuPoints = Array.isArray(obj.imuPoints) ? obj.imuPoints : [];
+    state.userMarkers = Array.isArray(obj.userMarkers) ? obj.userMarkers : [];
+    state.markerCategory = obj.markerCategory || state.markerCategory || "default";
+
+    const s = obj.settings || {};
+    if(typeof s.showGpsLine === "boolean") state.showGpsLine = s.showGpsLine;
+    if(typeof s.showImuLine === "boolean") state.showImuLine = s.showImuLine;
+    if(typeof s.followMap === "boolean") state.followMap = s.followMap;
+    if(typeof s.highAccuracy === "boolean") state.highAccuracy = s.highAccuracy;
+    if(typeof s.wakeLockEnabled === "boolean") state.wakeLockEnabled = s.wakeLockEnabled;
+    if(typeof s.autoRecoverWatch === "boolean") state.autoRecoverWatch = s.autoRecoverWatch;
+    if(typeof s.aggressiveSave === "boolean") state.aggressiveSave = s.aggressiveSave;
+    if(Number.isFinite(Number(s.minDistance))) state.minDistance = Number(s.minDistance);
+    if(Number.isFinite(Number(s.imuScale))) state.imuScale = Number(s.imuScale);
+    if(Number.isFinite(Number(s.imuFilterAlpha))) state.imuFilterAlpha = Number(s.imuFilterAlpha);
+    if(typeof s.exportFormat === "string") state.exportFormat = s.exportFormat;
+
+    state.error = "";
+    renderUserMarkers();
+    saveState();
+    updateUI();
+  }
+
   function exportTrack(){
     if(!state.points.length) return;
     if(state.exportFormat === "json"){
@@ -1129,6 +1192,25 @@
 
   function importGPX(file){
     file.text().then(function(text){
+      const lower = (file.name || "").toLowerCase();
+
+      if(lower.endsWith(".json")){
+        try{
+          const obj = JSON.parse(text);
+          if(obj && obj.app === "gps_imu_track_recorder"){
+            importFullBackup(obj);
+            return;
+          }
+          state.error = "這個 JSON 不是本 App 的完整備份格式。";
+          updateUI();
+          return;
+        }catch(err){
+          state.error = "JSON 讀取失敗。";
+          updateUI();
+          return;
+        }
+      }
+
       const xml = new DOMParser().parseFromString(text, "application/xml");
       const pts = Array.from(xml.getElementsByTagName("trkpt")).map(function(node, idx){
         return {
@@ -1140,15 +1222,19 @@
       }).filter(function(p){
         return Number.isFinite(p.lat) && Number.isFinite(p.lng);
       });
+
       if(!pts.length){
-        state.error = "這個 GPX 檔沒有可用軌跡點。";
+        state.error = "這個檔案沒有可用軌跡點。";
         updateUI();
         return;
       }
+
       state.points = pts;
       state.gpsPoints = pts.slice();
       state.imuPoints = [];
-      state.trackName = file.name.replace(/\.gpx$/i, "") || state.trackName;
+      state.trackName = file.name.replace(/\.(gpx|xml)$/i, "") || state.trackName;
+      state.error = "";
+      saveState();
       updateUI();
     });
   }
@@ -1188,6 +1274,7 @@
   el.showImuLine.addEventListener("change", function(){ state.showImuLine = this.checked; updateUI(); });
   el.exportFormat.addEventListener("change", function(){ state.exportFormat = this.value; saveState(); });
   el.exportBtn.addEventListener("click", exportTrack);
+  el.exportFullBtn.addEventListener("click", exportFullBackup);
   el.importFile.addEventListener("change", function(e){
     const file = e.target.files && e.target.files[0];
     if(file) importGPX(file);
