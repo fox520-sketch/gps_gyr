@@ -282,6 +282,7 @@
     imuLastMoveAt: null,
     imuLastAccel: null,
     imuPermissionHint: "unknown",
+    imuStatusText: "尚未啟動陀螺儀。",
     imuStillCounter: 0,
     imuLastAcceptedAt: null,
     error: ""
@@ -369,7 +370,8 @@
       markerCategory: state.markerCategory,
       imuStillCounter: state.imuStillCounter,
       imuLastAcceptedAt: state.imuLastAcceptedAt,
-      userMarkers: state.userMarkers
+      userMarkers: state.userMarkers,
+      imuStatusText: state.imuStatusText
     }));
   }
 
@@ -914,10 +916,12 @@
     let granted = true;
     try{
       if(typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function"){
-        granted = (await DeviceMotionEvent.requestPermission()) === "granted";
+        const motion = await DeviceMotionEvent.requestPermission();
+        granted = granted && (motion === "granted");
       }
       if(typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function"){
-        granted = granted && ((await DeviceOrientationEvent.requestPermission()) === "granted");
+        const orientation = await DeviceOrientationEvent.requestPermission();
+        granted = granted && (orientation === "granted");
       }
     }catch(e){
       granted = false;
@@ -945,6 +949,7 @@
     state.imuLastAccel = null;
     state.imuStillCounter = 0;
     state.imuLastAcceptedAt = null;
+    state.imuStatusText = "已啟動陀螺儀，等待感測事件…";
 
     const anchor = state.lastGpsFix || { lat: state.map.getCenter().lat, lng: state.map.getCenter().lng };
     state.imuSession = {
@@ -969,6 +974,9 @@
       if(Number.isFinite(rawHeading)){
         const alpha = Math.max(0, Math.min(0.99, Number(state.orientationSmoothingAlpha) || 0.85));
         state.orientationHeading = smoothHeading(state.orientationHeading, rawHeading, alpha);
+        if(state.imuStatusText.indexOf("等待感測事件") !== -1){
+          state.imuStatusText = "已收到方向事件。";
+        }
       }
     };
 
@@ -976,6 +984,7 @@
       if(!state.isRecording || state.isPaused || !state.imuEnabled) return;
       state.imuEventCount += 1;
       state.imuLastEventAt = Date.now();
+      if(state.imuEventCount === 1){ state.imuStatusText = "已收到 IMU 感測事件。"; }
 
       const s = state.imuSession;
       const ts = evt.timeStamp || performance.now();
@@ -1082,13 +1091,36 @@
   }
 
   async function startImuFlow(){
+    state.error = "";
+    state.imuStatusText = "正在啟動陀螺儀…";
+
+    const hasMotionApi = typeof window !== "undefined" && ("DeviceMotionEvent" in window || "ondevicemotion" in window);
+    const hasOrientationApi = typeof window !== "undefined" && ("DeviceOrientationEvent" in window || "ondeviceorientation" in window);
+
+    if(!hasMotionApi && !hasOrientationApi){
+      state.imuPermissionHint = "unsupported";
+      state.imuStatusText = "此裝置或瀏覽器不支援 IMU / 方向感測。";
+      state.error = "此裝置或瀏覽器不支援 IMU / 方向感測。";
+      updateUI();
+      return;
+    }
+
     const ok = await requestImuPermission();
     if(!ok){
+      state.imuStatusText = "未取得動作 / 方向感測權限。";
       state.error = "未取得動作 / 方向感測權限。";
       updateUI();
       return;
     }
+
     startImu();
+
+    setTimeout(function(){
+      if(state.imuEnabled && state.imuEventCount === 0){
+        state.imuStatusText = "已啟動陀螺儀，但尚未收到感測事件。請確認：1) 使用 HTTPS；2) 已授權；3) 實際移動手機。";
+        updateUI(false);
+      }
+    }, 1800);
   }
 
   function pauseRecording(){
@@ -1112,6 +1144,7 @@
     state.isPaused = false;
     state.gpsEnabled = false;
     state.imuEnabled = false;
+    state.imuStatusText = "尚未啟動陀螺儀。";
     updateElapsed();
     updateUI();
   }
@@ -1274,12 +1307,12 @@
 
   function updateImuDebug(){
     const parts = [];
-    const permissionText = state.imuPermissionHint === "granted"
-      ? '<span class="ok">已授權</span>'
-      : (state.imuPermissionHint === "denied"
-        ? '<span class="bad">未授權</span>'
-        : '未確認');
+    let permissionText = "未確認";
+    if(state.imuPermissionHint === "granted") permissionText = '<span class="ok">已授權</span>';
+    else if(state.imuPermissionHint === "denied") permissionText = '<span class="bad">未授權</span>';
+    else if(state.imuPermissionHint === "unsupported") permissionText = '<span class="bad">不支援</span>';
 
+    parts.push("狀態：" + escapeHtml(state.imuStatusText || "尚未啟動陀螺儀。"));
     parts.push("權限：" + permissionText);
     parts.push("IMU 點位：" + state.imuPoints.length);
     parts.push("感測事件數：" + state.imuEventCount);
@@ -1294,6 +1327,7 @@
     if(state.imuEnabled && state.imuEventCount === 0) parts.push('<span class="bad">已啟動 IMU，但還沒收到感測事件</span>');
     else if(state.imuEnabled && state.imuPoints.length === 0 && state.imuEventCount > 0) parts.push('<span class="bad">有收到 IMU 事件，但尚未形成可繪製軌跡</span>');
     else if(state.imuPoints.length > 0) parts.push('<span class="ok">IMU 軌跡已生成，地圖上應顯示紫色虛線</span>');
+    else if(state.imuEnabled) parts.push('已啟動，但還沒有形成軌跡；請實際移動手機。');
     else parts.push("尚未啟動陀螺儀。");
 
     el.imuDebugText.innerHTML = parts.join("<br>");
@@ -1378,6 +1412,7 @@
       gpsPoints: state.gpsPoints,
       imuPoints: state.imuPoints,
       userMarkers: state.userMarkers,
+      imuStatusText: state.imuStatusText,
       markerCategory: state.markerCategory,
       settings: {
         showGpsLine: state.showGpsLine,
