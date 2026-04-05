@@ -893,30 +893,30 @@
 
       const dt = (ts - s.lastTs) / 1000;
       s.lastTs = ts;
-      if(!Number.isFinite(dt) || dt <= 0 || dt > 0.25) return;
+      if(!Number.isFinite(dt) || dt <= 0 || dt > 0.3) return;
 
       const a = evt.acceleration || evt.accelerationIncludingGravity;
       if(!a) return;
 
       state.imuLastAccel = { x:Number(a.x||0), y:Number(a.y||0), z:Number(a.z||0) };
 
-      // 保留原始紫線：濾波較輕，不做 GPS 自動疊合，只在按校準時修正
-      const alpha = Math.max(0, Math.min(0.99, Number(state.imuFilterAlpha) || 0.96));
+      const alpha = Math.max(0, Math.min(0.97, Number(state.imuFilterAlpha) || 0.82));
       s.fx = alpha * s.fx + (1 - alpha) * Number(a.x || 0);
       s.fy = alpha * s.fy + (1 - alpha) * Number(a.y || 0);
 
       const mag = Math.hypot(s.fx, s.fy);
-      if(mag < 0.02){
+
+      if(mag < 0.004){
         state.imuStillCounter += 1;
       }else{
         state.imuStillCounter = 0;
       }
 
-      if(state.imuStillCounter >= 5){
-        s.velocityNorth *= 0.5;
-        s.velocityEast *= 0.5;
+      if(state.imuStillCounter >= 25){
+        s.velocityNorth *= 0.8;
+        s.velocityEast *= 0.8;
       }
-      if(state.imuStillCounter >= 12){
+      if(state.imuStillCounter >= 50){
         s.velocityNorth = 0;
         s.velocityEast = 0;
         return;
@@ -926,12 +926,12 @@
       const northAcc = (s.fy * Math.cos(heading) - s.fx * Math.sin(heading)) * state.imuScale;
       const eastAcc = (s.fy * Math.sin(heading) + s.fx * Math.cos(heading)) * state.imuScale;
 
-      s.velocityNorth = (s.velocityNorth + northAcc * dt) * 0.82;
-      s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.82;
+      s.velocityNorth = (s.velocityNorth + northAcc * dt) * 0.97;
+      s.velocityEast = (s.velocityEast + eastAcc * dt) * 0.97;
 
       const speed = Math.hypot(s.velocityNorth, s.velocityEast);
 
-      if(speed < 0.012 && mag < 0.03){
+      if(speed < 0.001 && mag < 0.006){
         return;
       }
 
@@ -939,7 +939,7 @@
       s.posEast += s.velocityEast * dt;
       state.imuLastMoveAt = Date.now();
 
-      if(state.imuLastAcceptedAt && Date.now() - state.imuLastAcceptedAt < 250){
+      if(state.imuLastAcceptedAt && Date.now() - state.imuLastAcceptedAt < 40){
         return;
       }
       state.imuLastAcceptedAt = Date.now();
@@ -1022,13 +1022,16 @@
     const lastImu = state.imuPoints[state.imuPoints.length - 1];
     const rawLatDelta = gpsRef.lat - lastImu.lat;
     const rawLngDelta = gpsRef.lng - lastImu.lng;
-    const step = Math.max(0.05, Math.min(1, Number(state.imuCalibrationStep) || 0.35));
+    const step = Math.max(0.05, Math.min(1, Number(state.imuCalibrationStep) || 0.15));
     const dLat = rawLatDelta * step;
     const dLng = rawLngDelta * step;
 
-    state.imuPoints = state.imuPoints.map(function(p){
-      return Object.assign({}, p, { lat: p.lat + dLat, lng: p.lng + dLng });
-    });
+    for(let i=0;i<state.imuPoints.length;i++){
+      state.imuPoints[i] = Object.assign({}, state.imuPoints[i], {
+        lat: state.imuPoints[i].lat + dLat,
+        lng: state.imuPoints[i].lng + dLng
+      });
+    }
 
     if(state.imuSession){
       state.imuSession.anchor = {
@@ -1040,7 +1043,7 @@
     state.points = state.gpsPoints.concat(state.imuPoints).sort(function(a,b){ return a.timestamp - b.timestamp; });
     state.error = "";
     saveState();
-    updateUI();
+    updateUI(false);
   }
 
   function updateCurrentPosition(){
