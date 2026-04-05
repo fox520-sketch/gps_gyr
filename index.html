@@ -130,6 +130,7 @@
     <div class="group"><div class="row"><div><label style="margin:0">顯示陀螺儀軌跡</label><div class="mini">紫色虛線可獨立開關</div></div><input id="showImuLine" class="switch" type="checkbox" checked></div></div>
 
     <div class="debug"><strong>IMU 偵測狀態</strong><div id="imuDebugText">尚未啟動陀螺儀。</div></div>
+    <div class="debug"><strong>IMU 偵錯模式</strong><div id="imuDiagText">尚未檢查。</div></div>
 
     <div class="grid2">
       <div class="stat"><div class="k">記錄時間</div><div class="v" id="statTime">00:00:00</div></div>
@@ -282,6 +283,8 @@
     imuLastMoveAt: null,
     imuLastAccel: null,
     imuPermissionHint: "unknown",
+    imuStatusText: "尚未啟動陀螺儀。",
+    imuDiag: {},
     imuStillCounter: 0,
     imuLastAcceptedAt: null,
     error: ""
@@ -314,6 +317,11 @@
     imuCalibrationStep: $("imuCalibrationStep"),
     imuPointIntervalSec: $("imuPointIntervalSec"),
     imuMaxStepMeters: $("imuMaxStepMeters"),
+    indoorMode: $("indoorMode"),
+    autoCalibrateImu: $("autoCalibrateImu"),
+    autoCalibrateIntervalSec: $("autoCalibrateIntervalSec"),
+    autoCalibrateMaxAccuracy: $("autoCalibrateMaxAccuracy"),
+    orientationSmoothingAlpha: $("orientationSmoothingAlpha"),
     exportFormat: $("exportFormat"),
     exportBtn: $("exportBtn"),
     exportFullBtn: $("exportFullBtn"),
@@ -336,6 +344,7 @@
     speedChart: $("speedChart"),
     altChart: $("altChart"),
     imuDebugText: $("imuDebugText"),
+    imuDiagText: $("imuDiagText"),
     tabBtns: Array.from(document.querySelectorAll(".tab-btn"))
   };
 
@@ -354,11 +363,18 @@
       imuCalibrationStep: state.imuCalibrationStep,
       imuPointIntervalSec: state.imuPointIntervalSec,
       imuMaxStepMeters: state.imuMaxStepMeters,
+      autoCalibrateImu: state.autoCalibrateImu,
+      autoCalibrateIntervalSec: state.autoCalibrateIntervalSec,
+      autoCalibrateMaxAccuracy: state.autoCalibrateMaxAccuracy,
+      indoorMode: state.indoorMode,
+      lastAutoCalibrateAt: state.lastAutoCalibrateAt,
+      orientationSmoothingAlpha: state.orientationSmoothingAlpha,
       exportFormat: state.exportFormat,
       markerCategory: state.markerCategory,
       imuStillCounter: state.imuStillCounter,
       imuLastAcceptedAt: state.imuLastAcceptedAt,
-      userMarkers: state.userMarkers
+      userMarkers: state.userMarkers,
+      imuStatusText: state.imuStatusText
     }));
   }
 
@@ -780,6 +796,56 @@
     updateUI();
   }
 
+  function smoothHeading(current, target, alpha){
+    if(!Number.isFinite(current)) return target;
+    if(!Number.isFinite(target)) return current;
+    let diff = ((target - current + 540) % 360) - 180;
+    return (current + diff * (1 - alpha) + 360) % 360;
+  }
+
+  function appendImuCalibrationPoint(gpsRef, reason){
+    if(!gpsRef || !Number.isFinite(gpsRef.lat) || !Number.isFinite(gpsRef.lng)) return false;
+    const point = {
+      lat: gpsRef.lat,
+      lng: gpsRef.lng,
+      accuracy: null,
+      altitude: null,
+      speed: 0,
+      heading: state.orientationHeading,
+      timestamp: Date.now(),
+      sourceMode: "imu",
+      placeName: state.placeName,
+      calibrationReason: reason || "auto"
+    };
+    addPoint(point);
+
+    if(state.imuSession){
+      state.imuSession.anchor = { lat: gpsRef.lat, lng: gpsRef.lng };
+      state.imuSession.posNorth = 0;
+      state.imuSession.posEast = 0;
+      state.imuSession.velocityNorth = 0;
+      state.imuSession.velocityEast = 0;
+      state.imuSession.pendingNorth = 0;
+      state.imuSession.pendingEast = 0;
+      state.imuSession.lastEmitLatLng = { lat: gpsRef.lat, lng: gpsRef.lng };
+      state.imuSession.lastEmitAt = Date.now();
+    }
+    state.lastAutoCalibrateAt = Date.now();
+    return true;
+  }
+
+  function maybeAutoCalibrateImu(gpsRef){
+    if(!state.autoCalibrateImu || !state.imuEnabled || !state.gpsEnabled) return;
+    if(!gpsRef || !Number.isFinite(gpsRef.lat) || !Number.isFinite(gpsRef.lng)) return;
+    const maxAcc = Math.max(3, Number(state.autoCalibrateMaxAccuracy) || 12);
+    if(Number.isFinite(gpsRef.accuracy) && gpsRef.accuracy > maxAcc) return;
+
+    const minIntervalMs = Math.max(2000, (Number(state.autoCalibrateIntervalSec) || 8) * 1000);
+    if(state.lastAutoCalibrateAt && (Date.now() - state.lastAutoCalibrateAt) < minIntervalMs) return;
+
+    appendImuCalibrationPoint(gpsRef, "auto");
+  }
+
   function clampImuStep(baseLatLng, northMeters, eastMeters){
     const maxStep = Math.max(0.1, Number(state.imuMaxStepMeters) || 1);
     const dist = Math.hypot(northMeters, eastMeters);
@@ -804,16 +870,22 @@
     };
     addPoint(gpsPoint);
 
-    // 只在剛啟動 IMU 且尚未生成 IMU 點時，用 GPS 當作 IMU 原始起點；之後不自動修正原始紫線
     if(state.imuEnabled && state.imuSession && (!state.imuPoints.length)){
       state.imuSession.anchor = { lat: gpsPoint.lat, lng: gpsPoint.lng };
       state.imuSession.posNorth = 0;
       state.imuSession.posEast = 0;
       state.imuSession.velocityNorth = 0;
       state.imuSession.velocityEast = 0;
-      saveState();
-      updateUI(false);
+      state.imuSession.pendingNorth = 0;
+      state.imuSession.pendingEast = 0;
+      state.imuSession.lastEmitLatLng = { lat: gpsPoint.lat, lng: gpsPoint.lng };
+      state.imuSession.lastEmitAt = Date.now();
     }
+
+    maybeAutoCalibrateImu(gpsPoint);
+
+    saveState();
+    updateUI(false);
   }
 
   function startGps(){
@@ -843,19 +915,66 @@
     updateUI();
   }
 
-  async function requestImuPermission(){
+    function getImuDiagnostics(){
+    const ua = navigator.userAgent || "";
+    return {
+      isSecureContext: !!window.isSecureContext,
+      protocol: location.protocol,
+      host: location.host,
+      deviceMotionApi: (typeof DeviceMotionEvent !== "undefined"),
+      deviceOrientationApi: (typeof DeviceOrientationEvent !== "undefined"),
+      ondevicemotion: ("ondevicemotion" in window),
+      ondeviceorientation: ("ondeviceorientation" in window),
+      hasMotionRequestPermission: (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function"),
+      hasOrientationRequestPermission: (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function"),
+      userAgent: ua,
+      isIOS: /iPhone|iPad|iPod/i.test(ua),
+      isAndroid: /Android/i.test(ua),
+      isInAppWebView: /Line|FBAN|FBAV|Instagram/i.test(ua)
+    };
+  }
+
+  function updateImuDiagnostics(extra){
+    state.imuDiag = Object.assign({}, getImuDiagnostics(), state.imuDiag || {}, extra || {});
+    const d = state.imuDiag;
+    const rows = [];
+    rows.push("安全環境：" + (d.isSecureContext ? '<span class="ok">是</span>' : '<span class="bad">否</span>'));
+    rows.push("協定：" + escapeHtml(String(d.protocol || "")) + " //" + escapeHtml(String(d.host || "")));
+    rows.push("DeviceMotionEvent：" + (d.deviceMotionApi ? '<span class="ok">有</span>' : '<span class="bad">無</span>'));
+    rows.push("DeviceOrientationEvent：" + (d.deviceOrientationApi ? '<span class="ok">有</span>' : '<span class="bad">無</span>'));
+    rows.push("requestPermission(Motion)：" + (d.hasMotionRequestPermission ? '<span class="ok">有</span>' : '無'));
+    rows.push("requestPermission(Orientation)：" + (d.hasOrientationRequestPermission ? '<span class="ok">有</span>' : '無'));
+    rows.push("權限結果：" + escapeHtml(String(d.permissionResult || "未請求")));
+    rows.push("方向事件：" + (d.orientationEventSeen ? '<span class="ok">收到</span>' : '未收到'));
+    rows.push("動作事件：" + (d.motionEventSeen ? '<span class="ok">收到</span>' : '未收到'));
+    rows.push("使用瀏覽器：" + (d.isInAppWebView ? '<span class="bad">疑似 App 內建瀏覽器</span>' : '一般瀏覽器'));
+    rows.push("平台：" + (d.isIOS ? 'iOS' : (d.isAndroid ? 'Android' : '其他')));
+    rows.push("建議：" + escapeHtml(String(d.suggestion || "按開始後實際移動手機測試")));
+    if(el.imuDiagText) el.imuDiagText.innerHTML = rows.join("<br>");
+  }
+
+async function requestImuPermission(){
     let granted = true;
+    let detail = [];
     try{
       if(typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function"){
-        granted = (await DeviceMotionEvent.requestPermission()) === "granted";
+        const motion = await DeviceMotionEvent.requestPermission();
+        detail.push("motion=" + motion);
+        granted = granted && (motion === "granted");
       }
       if(typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function"){
-        granted = granted && ((await DeviceOrientationEvent.requestPermission()) === "granted");
+        const orientation = await DeviceOrientationEvent.requestPermission();
+        detail.push("orientation=" + orientation);
+        granted = granted && (orientation === "granted");
       }
     }catch(e){
+      detail.push("error=" + (e && e.message ? e.message : "unknown"));
       granted = false;
     }
     state.imuPermissionHint = granted ? "granted" : "denied";
+    updateImuDiagnostics({
+      permissionResult: detail.length ? detail.join(", ") : (granted ? "granted" : "denied")
+    });
     return granted;
   }
 
@@ -878,6 +997,7 @@
     state.imuLastAccel = null;
     state.imuStillCounter = 0;
     state.imuLastAcceptedAt = null;
+    state.imuStatusText = "已啟動陀螺儀，等待感測事件…";
 
     const anchor = state.lastGpsFix || { lat: state.map.getCenter().lat, lng: state.map.getCenter().lng };
     state.imuSession = {
@@ -896,14 +1016,25 @@
     };
 
     state.imuOrientationHandler = function(evt){
-      if(typeof evt.webkitCompassHeading === "number") state.orientationHeading = evt.webkitCompassHeading;
-      else if(Number.isFinite(evt.alpha)) state.orientationHeading = 360 - evt.alpha;
+      let rawHeading = null;
+      if(typeof evt.webkitCompassHeading === "number") rawHeading = evt.webkitCompassHeading;
+      else if(Number.isFinite(evt.alpha)) rawHeading = 360 - evt.alpha;
+      if(Number.isFinite(rawHeading)){
+        const alpha = Math.max(0, Math.min(0.99, Number(state.orientationSmoothingAlpha) || 0.85));
+        state.orientationHeading = smoothHeading(state.orientationHeading, rawHeading, alpha);
+        updateImuDiagnostics({ orientationEventSeen: true, suggestion: "方向事件已收到，再移動手機應可看到 IMU 動作事件。" });
+        if(state.imuStatusText.indexOf("等待感測事件") !== -1){
+          state.imuStatusText = "已收到方向事件。";
+        }
+      }
     };
 
     state.imuMotionHandler = function(evt){
       if(!state.isRecording || state.isPaused || !state.imuEnabled) return;
       state.imuEventCount += 1;
       state.imuLastEventAt = Date.now();
+      if(state.imuEventCount === 1){ state.imuStatusText = "已收到 IMU 感測事件。"; }
+      if(state.imuEventCount >= 1){ updateImuDiagnostics({ motionEventSeen: true, suggestion: "IMU 已正常工作。" }); }
 
       const s = state.imuSession;
       const ts = evt.timeStamp || performance.now();
@@ -1010,13 +1141,48 @@
   }
 
   async function startImuFlow(){
-    const ok = await requestImuPermission();
-    if(!ok){
-      state.error = "未取得動作 / 方向感測權限。";
+    state.error = "";
+    state.imuStatusText = "正在啟動陀螺儀…";
+    updateImuDiagnostics({
+      suggestion: "若未收到事件，請確認：1) HTTPS；2) Safari/Chrome 正式瀏覽器；3) 已授權；4) 實際移動手機。"
+    });
+
+    const hasMotionApi = typeof window !== "undefined" && ("DeviceMotionEvent" in window || "ondevicemotion" in window);
+    const hasOrientationApi = typeof window !== "undefined" && ("DeviceOrientationEvent" in window || "ondeviceorientation" in window);
+
+    if(!hasMotionApi && !hasOrientationApi){
+      state.imuPermissionHint = "unsupported";
+      state.imuStatusText = "此裝置或瀏覽器不支援 IMU / 方向感測。";
+      state.error = "此裝置或瀏覽器不支援 IMU / 方向感測。";
+      updateImuDiagnostics({
+        suggestion: "請改用 Safari 或 Chrome，並避免 LINE / FB / IG 內建瀏覽器。"
+      });
       updateUI();
       return;
     }
+
+    const ok = await requestImuPermission();
+    if(!ok){
+      state.imuStatusText = "未取得動作 / 方向感測權限。";
+      state.error = "未取得動作 / 方向感測權限。";
+      updateImuDiagnostics({
+        suggestion: "iPhone 請到 設定 > Safari > 動作與方向存取 開啟，再重新整理。"
+      });
+      updateUI();
+      return;
+    }
+
     startImu();
+
+    setTimeout(function(){
+      if(state.imuEnabled && state.imuEventCount === 0){
+        state.imuStatusText = "已啟動陀螺儀，但尚未收到感測事件。";
+        updateImuDiagnostics({
+          suggestion: "請立即實際移動手機 2 到 3 秒；若仍無事件，請改用 Safari / Chrome 並確認 HTTPS。"
+        });
+        updateUI(false);
+      }
+    }, 1800);
   }
 
   function pauseRecording(){
@@ -1040,6 +1206,7 @@
     state.isPaused = false;
     state.gpsEnabled = false;
     state.imuEnabled = false;
+    state.imuStatusText = "尚未啟動陀螺儀。";
     updateElapsed();
     updateUI();
   }
@@ -1063,34 +1230,7 @@
       updateUI();
       return;
     }
-
-    // 在 IMU 軌跡最後「新增一個貼到 GPS 的點」
-    const newPoint = {
-      lat: gpsRef.lat,
-      lng: gpsRef.lng,
-      accuracy: null,
-      altitude: null,
-      speed: 0,
-      heading: state.orientationHeading,
-      timestamp: Date.now(),
-      sourceMode: "imu",
-      placeName: state.placeName
-    };
-
-    addPoint(newPoint);
-
-    // 同步更新 IMU session anchor，讓後續計算從這個點繼續
-    if(state.imuSession){
-      state.imuSession.anchor = { lat: gpsRef.lat, lng: gpsRef.lng };
-      state.imuSession.posNorth = 0;
-      state.imuSession.posEast = 0;
-      state.imuSession.velocityNorth = 0;
-      state.imuSession.velocityEast = 0;
-      state.imuSession.pendingNorth = 0;
-      state.imuSession.pendingEast = 0;
-      state.imuSession.lastEmitLatLng = { lat: gpsRef.lat, lng: gpsRef.lng };
-    }
-
+    appendImuCalibrationPoint(gpsRef, "manual");
     state.error = "";
     saveState();
     updateUI();
@@ -1229,12 +1369,12 @@
 
   function updateImuDebug(){
     const parts = [];
-    const permissionText = state.imuPermissionHint === "granted"
-      ? '<span class="ok">已授權</span>'
-      : (state.imuPermissionHint === "denied"
-        ? '<span class="bad">未授權</span>'
-        : '未確認');
+    let permissionText = "未確認";
+    if(state.imuPermissionHint === "granted") permissionText = '<span class="ok">已授權</span>';
+    else if(state.imuPermissionHint === "denied") permissionText = '<span class="bad">未授權</span>';
+    else if(state.imuPermissionHint === "unsupported") permissionText = '<span class="bad">不支援</span>';
 
+    parts.push("狀態：" + escapeHtml(state.imuStatusText || "尚未啟動陀螺儀。"));
     parts.push("權限：" + permissionText);
     parts.push("IMU 點位：" + state.imuPoints.length);
     parts.push("感測事件數：" + state.imuEventCount);
@@ -1249,6 +1389,7 @@
     if(state.imuEnabled && state.imuEventCount === 0) parts.push('<span class="bad">已啟動 IMU，但還沒收到感測事件</span>');
     else if(state.imuEnabled && state.imuPoints.length === 0 && state.imuEventCount > 0) parts.push('<span class="bad">有收到 IMU 事件，但尚未形成可繪製軌跡</span>');
     else if(state.imuPoints.length > 0) parts.push('<span class="ok">IMU 軌跡已生成，地圖上應顯示紫色虛線</span>');
+    else if(state.imuEnabled) parts.push('已啟動，但還沒有形成軌跡；請實際移動手機。');
     else parts.push("尚未啟動陀螺儀。");
 
     el.imuDebugText.innerHTML = parts.join("<br>");
@@ -1270,6 +1411,11 @@
     if(el.imuCalibrationStep) el.imuCalibrationStep.value = String(state.imuCalibrationStep);
     if(el.imuPointIntervalSec) el.imuPointIntervalSec.value = String(state.imuPointIntervalSec);
     if(el.imuMaxStepMeters) el.imuMaxStepMeters.value = String(state.imuMaxStepMeters);
+    if(el.indoorMode) el.indoorMode.checked = !!state.indoorMode;
+    if(el.autoCalibrateImu) el.autoCalibrateImu.checked = !!state.autoCalibrateImu;
+    if(el.autoCalibrateIntervalSec) el.autoCalibrateIntervalSec.value = String(state.autoCalibrateIntervalSec);
+    if(el.autoCalibrateMaxAccuracy) el.autoCalibrateMaxAccuracy.value = String(state.autoCalibrateMaxAccuracy);
+    if(el.orientationSmoothingAlpha) el.orientationSmoothingAlpha.value = String(state.orientationSmoothingAlpha);
     el.exportFormat.value = state.exportFormat;
     el.showGpsLine.checked = state.showGpsLine;
     el.showImuLine.checked = state.showImuLine;
@@ -1295,8 +1441,8 @@
     const imuTune = state.imuEnabled ? "；原始 IMU 紫線已啟用" : ""; const imuOverlay = state.imuEnabled ? "；可按校準逐次逼近 GPS" : ""; const hiddenInfo = (state.showGpsLine ? "" : "；GPS 線已隱藏") + (state.showImuLine ? "" : "；IMU 線已隱藏");
     const title = state.error || (state.isRecording ? "正在記錄" : "尚未開始");
     const text = latest
-      ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay
-      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay;
+      ? "最新點：" + latest.lat.toFixed(6) + ", " + latest.lng.toFixed(6) + "；GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay + autoCal
+      : "按下開始後會持續記錄 GPS 或陀螺儀相對軌跡。GPS點 " + state.gpsPoints.length + "；IMU點 " + state.imuPoints.length + "；GPS線 " + (state.showGpsLine ? "顯示" : "隱藏") + "；IMU線 " + (state.showImuLine ? "顯示" : "隱藏") + (state.placeName ? "；位置：" + state.placeName : "") + hiddenInfo + imuTune + imuOverlay + autoCal;
     el.statusBox.innerHTML = "<strong>" + escapeHtml(title) + "</strong><span>" + escapeHtml(text) + "</span>";
 
     renderPoints();
@@ -1304,6 +1450,7 @@
     renderMap();
     updateCharts();
     updateImuDebug();
+    updateImuDiagnostics();
     if(save) saveState();
   }
 
@@ -1328,6 +1475,7 @@
       gpsPoints: state.gpsPoints,
       imuPoints: state.imuPoints,
       userMarkers: state.userMarkers,
+      imuStatusText: state.imuStatusText,
       markerCategory: state.markerCategory,
       settings: {
         showGpsLine: state.showGpsLine,
@@ -1497,6 +1645,7 @@
   el.tabBtns.forEach(function(btn){ btn.addEventListener("click", function(){ switchTab(btn.dataset.tab); }); });
 
   loadState();
+  updateImuDiagnostics();
   initMap();
   renderUserMarkers();
 
